@@ -6,10 +6,20 @@ __pycache__
 *.onnx
 
 /lib/__pycache__
-/data/annotations
-/data/train2017
-/data/val2017
-/data/cropped
-/output/show_imgs
-/output/detect
+# /data/annotations
+# /data/train2017
+# /data/val2017
+# /data/cropped
+# /output/show_imgs
+# /output/detect
+output/
 
+# Ignore the idea and vscode
+.idea/
+.vscode/ 
+
+# Ignore the downloaded dataset
+data/coco2017/
+
+# Ignore other files
+data/cropped/

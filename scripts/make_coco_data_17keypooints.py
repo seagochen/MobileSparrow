@@ -2,14 +2,12 @@
 @Fire
 https://github.com/fire717
 """
-import os
 import json
-import pickle
+import os
+from pathlib import Path
+
 import cv2
 import numpy as np
-
-
-
 
 """
 segmentation格式取决于这个实例是一个单个的对象（即iscrowd=0，将使用polygons格式）
@@ -263,16 +261,21 @@ if __name__ == '__main__':
 
     output_img_dir = "./data/cropped/imgs"
 
+    main_dir = Path("./data/coco2017")
 
-    img_dir = "./data/val2017"
-    labels_path = "./data/annotations/person_keypoints_val2017.json"
+    img_dir = main_dir / "val2017"
+    labels_path = main_dir / "annotations" / "person_keypoints_val2017.json"
+
+    # img_dir = "./data/val2017"
+    # labels_path = "./data/annotations/person_keypoints_val2017.json"
     output_name = './data/cropped/val2017.json'
     main(img_dir, labels_path, output_name, output_img_dir)
 
-    
+    img_dir = main_dir / "train2017"
+    labels_path = main_dir / "annotations" / "person_keypoints_train2017.json"
 
-    img_dir = "./data/train2017"
-    labels_path = "./data/annotations/person_keypoints_train2017.json"
+    # img_dir = "./data/train2017"
+    # labels_path = "./data/annotations/person_keypoints_train2017.json"
     output_name = './data/cropped/train2017.json'
     main(img_dir, labels_path, output_name, output_img_dir)
 
