@@ -33,19 +33,19 @@ def getAccRight(dist, th = 5/cfg['img_size']):
                 res[i] = sum(dist[:,i]<th)
 
         return res
-
+#
 def myAcc(output, target):
     '''
     return [7,] ndarray
     '''
-    # print(output.shape) 
+    # print(output.shape)
     #64, 7, 40, 40     gaussian
     #(64, 14)                !gaussian
     # b
     #if hm_type == 'gaussian':
-    if len(output.shape) == 4:
-            output = heatmap2locate(output)
-            target = heatmap2locate(target)
+    # if len(output.shape) == 4:
+    #         output = heatmap2locate(output)
+    #         target = heatmap2locate(target)
 
 
     #offset方式还原坐标
