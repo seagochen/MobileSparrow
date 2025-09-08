@@ -11,7 +11,7 @@ import copy
 from torchvision import transforms
 
 from lib.data.data_tools import getDataLoader,getFileNames
-from lib.task.task_tools import movenetDecode
+from lib.task.task import movenetDecode
 
 
 

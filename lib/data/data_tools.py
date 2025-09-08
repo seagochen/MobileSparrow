@@ -1,26 +1,20 @@
 """
 @Fire
 https://github.com/fire717
-""" 
-from PIL import Image
-import numpy as np
-import pandas as pd
+"""
+import math
 import os
+import random
+
+import cv2
+import numpy as np
 import torch
 from torch.utils.data.dataset import Dataset
 
-
-import random
-import cv2
-import albumentations as A
-import json
-import platform
-import math
-
 from lib.data.data_augment import DataAug
-from lib.utils.utils import maxPoint,extract_keypoints
 
-def getFileNames(file_dir, tail_list=['.png','.jpg','.JPG','.PNG']): 
+
+def getFileNames(file_dir, tail_list=['.png','.jpg','.JPG','.PNG']):
     L=[] 
     for root, dirs, files in os.walk(file_dir):
         for file in files:

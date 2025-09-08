@@ -12,13 +12,16 @@ def main(cfg):
 
     init(cfg)
 
-
-    model = MoveNet(num_classes=cfg["num_classes"],
-                    width_mult=cfg["width_mult"],
-                    mode='train')
+    # 创建模型
+    # model = MoveNet(num_classes=cfg["num_classes"],
+    #                 width_mult=cfg["width_mult"],
+    #                 mode='train')
     # print(model)
     # b
-
+    model = MoveNet(
+        num_joints=cfg["num_classes"],
+        width_mult=cfg["width_mult"]
+    )
 
     data = Data(cfg)
     train_loader, val_loader = data.getTrainValDataloader()
