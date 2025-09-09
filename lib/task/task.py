@@ -9,9 +9,8 @@ Unified Task file (merges old task.py + task_tools.py)
 import os
 import gc
 import cv2
-import math
 import numpy as np
-from typing import Tuple, Dict, Union, List
+from typing import Tuple, Dict, List
 
 import torch
 import torch.nn as nn
