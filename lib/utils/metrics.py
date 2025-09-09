@@ -3,8 +3,8 @@
 https://github.com/fire717
 """
 import numpy as np
+from torch.ao.nn.quantized.functional import threshold
 
-from config import cfg
 
 def getDist(pre, labels):
         """
@@ -20,7 +20,7 @@ def getDist(pre, labels):
         return res
 
 
-def getAccRight(dist, th = 5/cfg['img_size']):
+def getAccRight(dist, th = 5, img_size = 192):
         """
         input:
                 dist: [batchsize, 7]
@@ -30,7 +30,8 @@ def getAccRight(dist, th = 5/cfg['img_size']):
         """
         res = np.zeros(dist.shape[1], dtype=np.int64)
         for i in range(dist.shape[1]):
-                res[i] = sum(dist[:,i]<th)
+            threshold = th / img_size
+            res[i] = sum(dist[:,i] < threshold)
 
         return res
 #

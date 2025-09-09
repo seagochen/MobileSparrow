@@ -3,13 +3,11 @@
 https://github.com/fire717
 """
 import os
-import torch
 import random
+
 import numpy as np
+import torch
 
-from operator import itemgetter
-
-from config import cfg
 
 def setRandomSeed(seed=42):
     """Reproducer for pytorch experiment.
