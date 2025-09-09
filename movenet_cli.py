@@ -63,11 +63,13 @@ def ensure_dir(p: str):
 # 组装模型与数据
 # ----------------------------------------------------------------------
 def build_model(cfg: Dict[str, Any]) -> torch.nn.Module:
-    # 你新的 MoveNet 构造签名
-    # 例：MoveNet(backbone=..., num_joints=..., width_mult=...)
+
+    # 构造MoveNet模型
     model = MoveNet(
         num_joints=cfg["num_classes"],
         width_mult=cfg.get("width_mult", 1.0),
+        neck_outc=cfg.get("neck_outc", 64),
+        head_midc=cfg.get("head_midc", 32),
         backbone=cfg.get("backbone", "mobilenet_v2"),
     )
     return model
@@ -83,12 +85,24 @@ def cmd_train(cfg: Dict[str, Any]):
     set_seed(cfg.get("random_seed", 42))
     ensure_dir(cfg["save_dir"])
 
-    model = build_model(cfg)
-    data = build_data(cfg)
+    model: torch.nn.Module = build_model(cfg)
+    data: CoCo2017DataLoader = build_data(cfg)
     train_loader, val_loader = data.getTrainValDataloader()
 
+    # 创建任务
     task = Task(cfg, model)
-    task.train(train_loader, val_loader)   # 你之前已改过只保留 best.pt/last.pt
+
+    # 如果有先前训练的结果，尝试加载
+    try:
+        weights = os.path.join(cfg.get("save_dir", "output"), "best.pt")
+        if os.path.exists(weights):
+            task.modelLoad(weights)
+            print(f"[INFO] Find the pre-trained weights file, load it and continue the training process")
+    except:
+        print(f"[INFO] Training a model from scratch")
+
+    # 开始训练任务
+    task.train(train_loader, val_loader)
 
 # ----------------------------------------------------------------------
 # 子命令：eval

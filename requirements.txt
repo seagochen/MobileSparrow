@@ -11,3 +11,4 @@ torchsummary
 onnxruntime
 kaggle
 onnx
+nvitop

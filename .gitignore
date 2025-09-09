@@ -6,17 +6,15 @@ __pycache__
 *.onnx
 
 /core/__pycache__
-# /data/annotations
-# /data/train2017
-# /data/val2017
-# /data/cropped
-# /output/show_imgs
-# /output/detect
 output/
+output*/
 
 # Ignore the idea and vscode
 .idea/
 .vscode/ 
+
+# Ignore other configuration files except config.json
+config_*.json
 
 # Ignore the downloaded dataset
 data/coco2017/
