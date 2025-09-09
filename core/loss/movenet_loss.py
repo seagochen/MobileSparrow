@@ -4,12 +4,12 @@
 """
 
 import os
-import torch
+
 import numpy as np
-import torch.nn.functional as F
+import torch
 
 # 原来写死：_img_size=192, _feature_map_size=_img_size//4, 现在全部改为“运行时从张量尺寸推断”
-_CENTER_WEIGHT_NPY = 'lib/data/center_weight_origin.npy'
+_CENTER_WEIGHT_NPY = 'core/data/center_weight_origin.npy'
 
 
 class JointBoneLoss(torch.nn.Module):

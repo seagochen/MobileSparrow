@@ -1,5 +1,5 @@
-import torch
 import torch.nn as nn
+
 
 def conv1x1(c_in, c_out): return nn.Sequential(nn.Conv2d(c_in, c_out, 1, 1, 0, bias=False),
                                                nn.BatchNorm2d(c_out),

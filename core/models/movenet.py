@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 from typing import Dict
 
-from lib.models.backbones.mobilenet_v2 import MobileNetV2Backbone
-from lib.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
-from lib.models.necks.fpn_lite import FPNLite
-from lib.models.heads.movenet_head import MoveNetHead
+from core.models.backbones.mobilenet_v2 import MobileNetV2Backbone
+from core.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
+from core.models.necks.fpn_lite import FPNLite
+from core.models.heads.movenet_head import MoveNetHead
+
 
 BACKBONES = {
     "mobilenet_v2": MobileNetV2Backbone,
@@ -40,7 +41,11 @@ class MoveNet(nn.Module):
 if __name__ == "__main__":
     m = MoveNet(backbone="mobilenet_v2", num_joints=17, width_mult=1.0).eval()
     x = torch.randn(1,3,192,192)
+
+    # 执行推论
     with torch.no_grad():
         y = m(x)
+
+    # 输出并查看4头的形状
     for k,v in y.items():
         print(k, v.shape)

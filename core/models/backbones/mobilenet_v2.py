@@ -1,6 +1,8 @@
+from typing import Tuple
+
 import torch
 import torch.nn as nn
-from typing import Tuple, List
+
 
 def conv_bn(inp, oup, k, s, p, g=1, act=True):
     layers = [nn.Conv2d(inp, oup, k, s, p, groups=g, bias=False),

@@ -1,4 +1,4 @@
-# lib/dataloader.py
+# core/dataloader.py
 # -*- coding: utf-8 -*-
 """
 Unified COCO Keypoints dataset for MoveNet-style training
@@ -8,15 +8,15 @@ Unified COCO Keypoints dataset for MoveNet-style training
 - 特征图尺寸: img_size // target_stride（默认为 4）
 """
 
-import os
 import json
-import math
-from typing import List, Tuple, Dict, Any, Optional
+import os
+from typing import List, Tuple, Dict, Any
 
 import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+
 
 # -----------------------
 # 工具函数
@@ -357,7 +357,7 @@ class CocoKeypointsDataset(Dataset):
 # -----------------------
 # 对外封装（兼容旧接口）
 # -----------------------
-class Data:
+class CoCo2017DataLoader:
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
         self.img_size = int(cfg.get("img_size", 192))

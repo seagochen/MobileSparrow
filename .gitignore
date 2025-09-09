@@ -5,7 +5,7 @@ __pycache__
 *.bak
 *.onnx
 
-/lib/__pycache__
+/core/__pycache__
 # /data/annotations
 # /data/train2017
 # /data/val2017

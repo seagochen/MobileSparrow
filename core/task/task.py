@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Unified Task file (merges old task.py + task_tools.py)
-- Compatible with new dict outputs from MoveNet (heatmaps/centers/regs/offsets)
+Unified Task file
+- merges old task.py + task_tools.py + metrics.py (myAcc)
+- Compatible with dict outputs: {"heatmaps","centers","regs","offsets"}
 - Dynamic HxW decoding (no hard-coded 48)
-- Auto align (resize) model heads to label feature size (default img_size//4)
+- Auto-align model heads to label feature size (default img_size//4)
 """
 
 import os
@@ -17,9 +18,43 @@ import torch.nn as nn
 import torch.optim as optim
 
 # ====== external (keep your existing loss) ======
-from lib.loss.movenet_loss import MovenetLoss
-from lib.utils.metrics import myAcc
-from lib.utils.utils import printDash
+from core.loss.movenet_loss import MovenetLoss
+
+
+# =========================
+# >>> metrics (inlined) <<<
+# =========================
+def _getDist(pre: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """
+    pre:    [B, 2*J]   normalized coords in [0,1] or -1 for invalid
+    labels: [B, 2*J]
+    return: [B, J] squared distance per joint
+    """
+    pre = pre.reshape([-1, 17, 2])
+    labels = labels.reshape([-1, 17, 2])
+    res = (pre[:, :, 0] - labels[:, :, 0]) ** 2 + (pre[:, :, 1] - labels[:, :, 1]) ** 2
+    return res
+
+
+def _getAccRight(dist: np.ndarray, th: float = 5, img_size: int = 192) -> np.ndarray:
+    """
+    dist: [B, J] squared distance in normalized coords
+    th:   pixel threshold (default 5px) on original img_size
+    return: [J,] int counts of correct per joint
+    """
+    # threshold is applied on Euclidean distance, so compare sqrt(dist) < th/img_size
+    thr = th / float(img_size)
+    res = np.sum(np.sqrt(dist) < thr, axis=0).astype(np.int64)
+    return res
+
+
+def myAcc(output: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """
+    return [J,] ndarray: per-joint correct counts in this batch
+    """
+    dist = _getDist(output, target)
+    cate_acc = _getAccRight(dist)
+    return cate_acc
 
 
 # =========================
@@ -86,13 +121,6 @@ def _split_pred_tensors(output) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.
         rg = _to_numpy(output[2])
         of = _to_numpy(output[3])
     return hm, ct, rg, of
-
-
-def _to_list_tensors(output) -> List[torch.Tensor]:
-    """Return [hm, ct, rg, of] as tensors, supports dict / list outputs (for loss)."""
-    if isinstance(output, dict):
-        return [output["heatmaps"], output["centers"], output["regs"], output["offsets"]]
-    return list(output)
 
 
 def _resize_heads_to(hm: torch.Tensor,
@@ -187,8 +215,6 @@ def movenetDecode(data,
             x_n = (jx + off_x) / float(W)
             y_n = (jy + off_y) / float(H)
 
-            # bad = (score < hm_th).astype(np.float32) | (1.0 - kps_mask_np[:, n:n + 1])
-            # 修改为（先做布尔逻辑，再转 float）
             bad = np.logical_or((score < hm_th), (kps_mask_np[:, n:n+1] < 0.5)).astype(np.float32)
             x_n = x_n * (1.0 - bad) + (-1.0) * bad
             y_n = y_n * (1.0 - bad) + (-1.0) * bad
@@ -255,9 +281,8 @@ class Task():
         self.scheduler = getSchedu(self.cfg['scheduler'], self.optimizer)
 
         # ===== alignment target (label map size) =====
-        # 默认标签在 stride=4（192->48）。如你的标注是其它比例，改这里。
         self.img_size = int(self.cfg.get("img_size", 192))
-        self.target_stride = int(self.cfg.get("target_stride", 4))
+        self.target_stride = int(self.cfg.get("target_stride", 4))  # label通常在 stride=4
         self.target_hw = (self.img_size // self.target_stride, self.img_size // self.target_stride)
 
         self.best_score = float("-inf")         # 记录验证集最佳指标（越大越好）
@@ -266,11 +291,10 @@ class Task():
 
     def _align_output_for_loss_and_decode(self, output) -> Tuple[List[torch.Tensor], Dict[str, torch.Tensor]]:
         """
-        1) 把模型输出（dict/list）取出四头
+        1) 取出四头
         2) resize 到 (Ht,Wt) = label feature map 大小
         3) 返回：list 版（给 loss）和 dict 版（给 decode/可视化）
         """
-        # tensors
         if isinstance(output, dict):
             hm_t, ct_t, rg_t, of_t = output["heatmaps"], output["centers"], output["regs"], output["offsets"]
         else:
@@ -302,7 +326,7 @@ class Task():
             raw_out = self.model(imgs)
             out_list, out_dict = self._align_output_for_loss_and_decode(raw_out)
 
-            # loss (expects list-like: [hm, center, regs, offsets])
+            # loss
             heatmap_loss, bone_loss, center_loss, regs_loss, offset_loss = self.loss_func(out_list, labels, kps_mask)
             total_loss = heatmap_loss + center_loss + regs_loss + offset_loss + bone_loss
 
@@ -364,27 +388,17 @@ class Task():
                      np.mean(right_count / total_count)))
             print()
 
-        # if 'default' in self.cfg['scheduler']:
-        #     self.scheduler.step(np.mean(right_count / total_count))
-        # else:
-        #     self.scheduler.step()
-
-        # save_name = 'e%d_valacc%.5f.pth' % (epoch + 1, np.mean(right_count / total_count))
-        # self.modelSave(save_name)
-
-        val_acc = float(np.mean(right_count / total_count))  # 当前验证集指标
-
         # 学习率调度
+        val_acc = float(np.mean(right_count / total_count))
         if 'default' in self.cfg['scheduler']:
             self.scheduler.step(val_acc)
         else:
             self.scheduler.step()
 
-        # 1) 永远保存最新一次验证后的权重为 last.pt
+        # 保存 last.pt / best.pt
         last_path = os.path.join(self.save_dir, "last.pt")
         torch.save(self.model.state_dict(), last_path)
 
-        # 2) 如果当前指标更好，更新 best.pt
         if val_acc > self.best_score:
             self.best_score = val_acc
             best_path = os.path.join(self.save_dir, "best.pt")
@@ -398,9 +412,9 @@ class Task():
         gc.collect()
         torch.cuda.empty_cache()
         if self.cfg.get("cfg_verbose", False):
-            printDash()
+            print("-" * 80)
             print(self.cfg)
-            printDash()
+            print("-" * 80)
 
     # ===== inference / viz =====
     def predict(self, data_loader, save_dir):
@@ -465,7 +479,3 @@ class Task():
         self.model.load_state_dict(torch.load(model_path), strict=True)
         if data_parallel:
             self.model = torch.nn.DataParallel(self.model)
-
-    # def modelSave(self, save_name):
-    #     os.makedirs(self.cfg['save_dir'], exist_ok=True)
-    #     torch.save(self.model.state_dict(), os.path.join(self.cfg['save_dir'], save_name))

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Tuple
 
+
 def channel_shuffle(x, groups: int):
     b, c, h, w = x.size()
     x = x.view(b, groups, c // groups, h, w).transpose(1, 2).contiguous()

@@ -1,5 +1,5 @@
-import torch
 import torch.nn as nn
+
 
 class MoveNetHead(nn.Module):
     """
@@ -19,8 +19,8 @@ class MoveNetHead(nn.Module):
 
     def forward(self, x):
         return {
-            "heatmaps": self.hm(x),
-            "centers":  self.ct(x),
-            "regs":     self.reg(x),
-            "offsets":  self.off(x),
+            "heatmaps": self.hm(x),     # B×17×48×48,
+            "centers":  self.ct(x),     # B×1 ×48×48,
+            "regs":     self.reg(x),    # B×34×48×48,
+            "offsets":  self.off(x),    # B×34×48×48
         }

@@ -6,7 +6,7 @@ import os
 import random
 import pandas as pd   
 
-from lib import init, Data, MoveNet, Task
+from core import init, Data, MoveNet, Task
 
 from config import cfg
 

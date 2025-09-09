@@ -21,8 +21,7 @@ from typing import Any, Dict
 import numpy as np
 import torch
 
-# ===== 你的工程内模块（保持原有目录结构） =====
-from lib import init, Data, MoveNet, Task  # 与现有工程保持一致
+from core import init, CoCo2017DataLoader, MoveNet, Task
 
 
 # ----------------------------------------------------------------------
@@ -67,7 +66,7 @@ def build_model(cfg: Dict[str, Any]) -> torch.nn.Module:
     return model
 
 def build_data(cfg: Dict[str, Any]):
-    return Data(cfg)
+    return CoCo2017DataLoader(cfg)
 
 # ----------------------------------------------------------------------
 # 子命令：train
@@ -233,7 +232,7 @@ def build_parser():
 
     sp_ex = sub.add_parser("export-onnx", help="导出 ONNX")
     sp_ex.add_argument("--weights", type=str, help="权重（默认 best.pt / last.pt）")
-    sp_ex.add_argument("--out", type=str, default="output/movenet.onnx", help="ONNX 路径")
+    sp_ex.add_argument("--out", type=str, default="output/core.onnx", help="ONNX 路径")
     sp_ex.add_argument("--opset", type=int, default=13)
     sp_ex.add_argument("--dynamic", action="store_true", help="导出动态高宽/批次")
     sp_ex.add_argument("--verify", action="store_true", help="导出后用 onnxruntime 快速校验")
