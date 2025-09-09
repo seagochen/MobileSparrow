@@ -14,26 +14,22 @@ Unified CLI for MoveNet project:
 
 import os
 import argparse
-import glob
 import json
 import random
 from pathlib import Path
 from typing import Any, Dict
 
-import cv2
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 import core
-from core.predictor import run_prediction
+from core.dataloader.simple_loader import SimpleImageFolder
 from core.task.task import Task
 from core.models.movenet import MoveNet
 from core.models.dummy_movenet import DummyMoveNet
 from core.dataloader.dataloader import CoCo2017DataLoader
-from core.dataloader.simple_loader import SimpleImageFolder
 
-import tqdm  
 
 # ----------------------------------------------------------------------
 # 工具
@@ -114,40 +110,30 @@ def cmd_eval(cfg: Dict[str, Any], weights: str):
 # ----------------------------------------------------------------------
 # 子命令：predict（简单演示，复用你 Task.predict 时的可视化）
 # ----------------------------------------------------------------------
-def cmd_predict(cfg, images_dir, out_dir):
-    # args.images 是图像目录，args.out 是输出目录
-    img_paths = glob.glob(os.path.join(images_dir, '*.jpg')) + \
-                glob.glob(os.path.join(images_dir, '*.png'))
-    
-    if not img_paths:
-        print(f"[Error] No images found in directory: {args.images}")
-        return
-
+def cmd_predict(cfg, images_dir, out_dir, weights=None):
+    core.init(cfg)  # 和 train/eval 一致的初始化
     os.makedirs(out_dir, exist_ok=True)
-    
-    # 将模型设置为评估模式
+
+    # 1) 构建模型 & Task
     model = build_model(cfg)
     task = Task(cfg, model)
-    task.model.eval()
-    
-    print(f"Starting prediction for {len(img_paths)} images...")
-    
-    for img_path in tqdm.tqdm(img_paths):
-        try:
-            # 调用全新的预测函数
-            result_image = run_prediction(task.model, 
-                                          img_path, 
-                                          task.device, 
-                                          task.cfg)
-            
-            # 保存结果
-            save_path = os.path.join(out_dir, os.path.basename(img_path))
-            cv2.imwrite(save_path, result_image)
 
-        except Exception as e:
-            print(f"\n[Error] Failed to process {os.path.basename(img_path)}: {e}")
-            
-    print(f"Prediction complete. Results saved to: {out_dir}")
+    # 2) 选择权重：--weights > best.pt > last.pt
+    if not weights:
+        cand_best = Path(cfg["save_dir"]) / "best.pt"
+        cand_last = Path(cfg["save_dir"]) / "last.pt"
+        if cand_best.exists():
+            weights = str(cand_best)
+        elif cand_last.exists():
+            weights = str(cand_last)
+        else:
+            raise FileNotFoundError("未找到可用权重，请用 --weights 指定，或先训练得到 best.pt/last.pt。")
+    task.modelLoad(weights)  # ←←← 关键：加载训练好的权重
+
+    # 3) 用 SimpleImageFolder 做 DataLoader，然后直接用 Task.predict 输出
+    dataset = SimpleImageFolder(images_dir, img_size=cfg["img_size"])
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+    task.predict(loader, out_dir)   # 会输出和旧版一致的 1+4 张图
 
     
 # ----------------------------------------------------------------------
@@ -188,11 +174,11 @@ def cmd_export_onnx(cfg: Dict[str, Any], weights: str, out_path: str,
     h = w = int(cfg.get("img_size", 192))
     dummy = torch.randn(1, 3, h, w, device=device)
 
-    # 需要 onnx
-    try:
-        import onnx  # noqa: F401
-    except Exception:
-        raise RuntimeError("缺少 onnx，请先安装：pip install onnx")
+    # # 需要 onnx
+    # try:
+    #     import onnx  # noqa: F401
+    # except Exception:
+    #     raise RuntimeError("缺少 onnx，请先安装：pip install onnx")
 
     use_keypoints = bool(cfg.get("export_keypoints", False))
     print(f"[INFO] Exporting to ONNX: {out_path} (opset={opset}, dynamic={dynamic}, keypoints={use_keypoints})")
@@ -334,6 +320,7 @@ def build_parser():
     sp_pr = sub.add_parser("predict", help="对目录中的图片进行预测与可视化")
     sp_pr.add_argument("--images", type=str, required=True, help="输入图片目录")
     sp_pr.add_argument("--out", type=str, required=True, help="输出目录 (保存可视化结果)")
+    sp_pr.add_argument("--weights", type=str, help="权重路径 (默认 save_dir/best.pt 或 last.pt)")
 
     # ========== export-onnx ==========
     sp_ex = sub.add_parser("export-onnx", help="导出 ONNX 模型文件")
@@ -386,7 +373,8 @@ def main():
     elif args.cmd == "eval":
         cmd_eval(cfg, weights=getattr(args, "weights", None))
     elif args.cmd == "predict":
-        cmd_predict(cfg, images_dir=args.images, out_dir=args.out)
+        cmd_predict(cfg, images_dir=args.images, out_dir=args.out,
+                    weights=getattr(args, "weights", None))
     elif args.cmd == "export-onnx":
         cmd_export_onnx(cfg,
                         weights=getattr(args, "weights", None),

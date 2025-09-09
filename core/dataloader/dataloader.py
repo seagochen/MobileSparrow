@@ -104,6 +104,7 @@ def _get_center_from_kps(kps_xyv: np.ndarray) -> Tuple[float, float]:
 # -----------------------
 # 数据集
 # -----------------------
+
 class CocoKeypointsDataset(Dataset):
     def __init__(self,
                  img_root: str,
@@ -120,17 +121,9 @@ class CocoKeypointsDataset(Dataset):
                  scale_range: Tuple[float, float] = (0.75, 1.25),
                  select_person: str = "largest",  # 或 "random"
                  is_train: bool = True):
-        """
-        img_root: 图片目录
-        ann_path: COCO keypoints json（person_keypoints_train2017.json / val2017.json）
-        img_size: 最终输入分辨率（正方形）
-        target_stride: label 特征图步长（默认4 => 192/4=48）
-        gaussian_radius: 高斯半径（像素，作用在特征图上）
-        sigma_scale: 高斯强度缩放
-        其余为增广开关与强度
-        """
         super().__init__()
-        self.img_root = img_root
+        # 规范根目录为绝对路径
+        self.img_root = os.path.abspath(img_root)
         self.ann_path = ann_path
         self.img_size = int(img_size)
         self.stride = int(target_stride)
@@ -154,22 +147,32 @@ class CocoKeypointsDataset(Dataset):
             ann = json.load(f)
 
         self.imgid_to_info: Dict[int, Dict[str, Any]] = {im["id"]: im for im in ann["images"]}
+
         anns_all = [a for a in ann["annotations"] if a.get("category_id", 1) == 1]
+        if self.is_train:
+            # 训练时常见的清洗：剔除 crowd 或 无关键点 的样本
+            anns_all = [a for a in anns_all if a.get("iscrowd", 0) == 0 and a.get("num_keypoints", 0) > 0]
+
         # 按 image_id 聚合
         imgid_to_anns: Dict[int, List[Dict[str, Any]]] = {}
         for a in anns_all:
             imgid_to_anns.setdefault(a["image_id"], []).append(a)
 
-        # 仅保留至少有一个 annotation 的图像
+        # 仅保留至少有一个 annotation 的图像；路径统一为“绝对路径”
         self.items: List[Tuple[str, List[Dict[str, Any]]]] = []
         for img_id, anns in imgid_to_anns.items():
             info = self.imgid_to_info.get(img_id)
-            if info is None:
+            if not info:
                 continue
-            file_name = info["file_name"]
-            img_path = os.path.join(self.img_root, file_name)
+            file_name = info.get("file_name")
+            if not file_name:
+                continue
+            img_path = os.path.abspath(os.path.join(self.img_root, file_name))
             if os.path.isfile(img_path):
                 self.items.append((img_path, anns))
+
+        if not self.items:
+            raise FileNotFoundError(f"No images found via annotations under: {self.img_root}")
 
     def __len__(self):
         return len(self.items)

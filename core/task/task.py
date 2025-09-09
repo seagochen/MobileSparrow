@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Unified Task file
+Unified Task file (refined)
 - merges old task.py + task_tools.py + metrics.py (myAcc)
 - Compatible with dict outputs: {"heatmaps","centers","regs","offsets"}
 - Dynamic HxW decoding (no hard-coded 48)
 - Auto-align model heads to label feature size (default img_size//4)
+- Stable path handling for img_name (nested -> str)
 """
 
 import os
 import gc
 import cv2
 import numpy as np
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Iterable, Union
 
 import torch
 import torch.nn as nn
@@ -42,16 +43,13 @@ def _getAccRight(dist: np.ndarray, th: float = 5, img_size: int = 192) -> np.nda
     th:   pixel threshold (default 5px) on original img_size
     return: [J,] int counts of correct per joint
     """
-    # threshold is applied on Euclidean distance, so compare sqrt(dist) < th/img_size
-    thr = th / float(img_size)
+    thr = th / float(img_size)  # compare sqrt(dist) with normalized threshold
     res = np.sum(np.sqrt(dist) < thr, axis=0).astype(np.int64)
     return res
 
 
 def myAcc(output: np.ndarray, target: np.ndarray) -> np.ndarray:
-    """
-    return [J,] ndarray: per-joint correct counts in this batch
-    """
+    """Return [J,] ndarray: per-joint correct counts in this batch."""
     dist = _getDist(output, target)
     cate_acc = _getAccRight(dist)
     return cate_acc
@@ -60,7 +58,7 @@ def myAcc(output: np.ndarray, target: np.ndarray) -> np.ndarray:
 # =========================
 # Schedulers / Optimizers
 # =========================
-def getSchedu(schedu, optimizer):
+def getSchedu(schedu: str, optimizer):
     if 'default' in schedu:
         factor = float(schedu.strip().split('-')[1])
         patience = int(schedu.strip().split('-')[2])
@@ -80,21 +78,21 @@ def getSchedu(schedu, optimizer):
         gamma = float(schedu.strip().split('-')[2])
         scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
     else:
-        raise Exception("Unknow schedu.")
+        raise Exception("Unknown scheduler.")
     return scheduler
 
 
-def getOptimizer(optims, model, learning_rate, weight_decay):
+def getOptimizer(optims: str, model, learning_rate: float, weight_decay: float):
     if optims == 'Adam':
         optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     elif optims == 'SGD':
         optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
     else:
-        raise Exception("Unknow optims.")
+        raise Exception("Unknown optimizer.")
     return optimizer
 
 
-def clipGradient(optimizer, grad_clip=1):
+def clipGradient(optimizer, grad_clip=1.0):
     for group in optimizer.param_groups:
         for param in group["params"]:
             if param.grad is not None:
@@ -269,7 +267,8 @@ def movenetDecode(data,
 class Task():
     def __init__(self, cfg, model):
         self.cfg = cfg
-        self.device = torch.device("cuda" if self.cfg.get('GPU_ID', '') != '' and torch.cuda.is_available() else "cpu")
+        use_cuda = (self.cfg.get('GPU_ID', '') != '' and torch.cuda.is_available())
+        self.device = torch.device("cuda" if use_cuda else "cpu")
         self.model = model.to(self.device)
 
         # ===== loss / optim / sched =====
@@ -306,7 +305,9 @@ class Task():
         as_dict = {"heatmaps": hm_r, "centers": ct_r, "regs": rg_r, "offsets": of_r}
         return as_list, as_dict
 
-    # ===== core loops =====
+    # -------------------------
+    # >>> core loops
+    # -------------------------
     def train(self, train_loader, val_loader):
         for epoch in range(self.cfg['epochs']):
             self.onTrainStep(train_loader, epoch)
@@ -315,7 +316,7 @@ class Task():
 
     def onTrainStep(self, train_loader, epoch):
         self.model.train()
-        right_count = np.array([0] * self.cfg['num_classes'], dtype=np.int64)
+        right_count = np.zeros(self.cfg['num_classes'], dtype=np.int64)
         total_count = 0
 
         for batch_idx, (imgs, labels, kps_mask, img_names) in enumerate(train_loader):
@@ -330,11 +331,10 @@ class Task():
             heatmap_loss, bone_loss, center_loss, regs_loss, offset_loss = self.loss_func(out_list, labels, kps_mask)
             total_loss = heatmap_loss + center_loss + regs_loss + offset_loss + bone_loss
 
-            if self.cfg.get('clip_gradient', 0):
-                clipGradient(self.optimizer, self.cfg['clip_gradient'])
-
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             total_loss.backward()
+            if self.cfg.get('clip_gradient', 0):
+                clipGradient(self.optimizer, float(self.cfg['clip_gradient']))
             self.optimizer.step()
 
             # evaluate (decode both pred & label)
@@ -345,22 +345,26 @@ class Task():
             total_count += labels.shape[0]
 
             if batch_idx % self.cfg['log_interval'] == 0:
+                iters_per_epoch = max(1, len(train_loader.dataset) // self.cfg['batch_size'])
                 print('\r',
                       '%d/%d [%d/%d] '
                       'loss: %.4f (hm: %.3f b: %.3f c: %.3f r: %.3f o: %.3f) - acc: %.4f      ' %
                       (epoch + 1, self.cfg['epochs'],
-                       batch_idx, len(train_loader.dataset) // self.cfg['batch_size'],
+                       batch_idx, iters_per_epoch,
                        total_loss.item(),
                        heatmap_loss.item(), bone_loss.item(), center_loss.item(),
                        regs_loss.item(), offset_loss.item(),
-                       np.mean(right_count / total_count)),
+                       float(np.mean(right_count / max(1, total_count)))),
                       end='', flush=True)
         print()
 
     def onValidation(self, val_loader, epoch):
         self.model.eval()
-        right_count = np.array([0] * self.cfg['num_classes'], dtype=np.int64)
+        right_count = np.zeros(self.cfg['num_classes'], dtype=np.int64)
         total_count = 0
+
+        sum_hm = sum_b = sum_c = sum_r = sum_o = sum_total = 0.0
+        n_batches = 0
 
         with torch.no_grad():
             for batch_idx, (imgs, labels, kps_mask, img_names) in enumerate(val_loader):
@@ -377,19 +381,32 @@ class Task():
                 pre = movenetDecode(out_dict, kps_mask, mode='output')
                 gt  = movenetDecode(labels,  kps_mask, mode='label')
                 acc = myAcc(pre, gt)
+
                 right_count += acc
                 total_count += labels.shape[0]
 
-            print('LR: %f - [Val] loss: %.5f [hm: %.4f b: %.4f c: %.4f r: %.4f o: %.4f] - acc: %.4f'
-                  % (self.optimizer.param_groups[0]["lr"],
-                     total_loss.item(),
-                     heatmap_loss.item(), bone_loss.item(), center_loss.item(),
-                     regs_loss.item(), offset_loss.item(),
-                     np.mean(right_count / total_count)))
-            print()
+                sum_hm += float(heatmap_loss.item())
+                sum_b  += float(bone_loss.item())
+                sum_c  += float(center_loss.item())
+                sum_r  += float(regs_loss.item())
+                sum_o  += float(offset_loss.item())
+                sum_total += float(total_loss.item())
+                n_batches += 1
+
+        mean_hm = sum_hm / max(1, n_batches)
+        mean_b  = sum_b  / max(1, n_batches)
+        mean_c  = sum_c  / max(1, n_batches)
+        mean_r  = sum_r  / max(1, n_batches)
+        mean_o  = sum_o  / max(1, n_batches)
+        mean_total = sum_total / max(1, n_batches)
+        val_acc = float(np.mean(right_count / max(1, total_count)))
+
+        print('LR: %f - [Val] loss: %.5f [hm: %.4f b: %.4f c: %.4f r: %.4f o: %.4f] - acc: %.4f\n'
+              % (self.optimizer.param_groups[0]["lr"],
+                 mean_total, mean_hm, mean_b, mean_c, mean_r, mean_o,
+                 val_acc))
 
         # 学习率调度
-        val_acc = float(np.mean(right_count / total_count))
         if 'default' in self.cfg['scheduler']:
             self.scheduler.step(val_acc)
         else:
@@ -416,7 +433,26 @@ class Task():
             print(self.cfg)
             print("-" * 80)
 
-    # ===== inference / viz =====
+    # -------------------------
+    # >>> utils
+    # -------------------------
+    @staticmethod
+    def _to_path(name: Union[str, os.PathLike, Iterable]) -> Union[str, None]:
+        """
+        Recursively unwrap DataLoader-collated structures until a str/PathLike is reached.
+        Returns an OS fspath string or None if unsupported.
+        """
+        while isinstance(name, (list, tuple)):
+            if not name:
+                break
+            name = name[0]
+        if isinstance(name, (str, os.PathLike)):
+            return os.fspath(name)
+        return None
+
+    # -------------------------
+    # >>> inference / viz
+    # -------------------------
     def predict(self, data_loader, save_dir):
         os.makedirs(save_dir, exist_ok=True)
         self.model.eval()
@@ -427,18 +463,19 @@ class Task():
                 _, out_dict = self._align_output_for_loss_and_decode(output)
 
                 pre = movenetDecode(out_dict, None, mode='output')
-                
-                # Corrected line: access the string inside the list
-                basename = img_name[0][0]
-                
-                img_np = np.transpose(img[0].cpu().numpy(), (1, 2, 0))
-                # Convert from [0,1] float to [0,255] uint8
+
+                # —— 路径处理（稳定）—— #
+                name = self._to_path(img_name)
+                if name is None:
+                    raise TypeError(f"Unsupported img_name structure: {type(img_name)} -> {img_name!r}")
+                basename = os.path.basename(name)
+
+                # —— 可视化 —— #
+                img_np = np.transpose(img[0].detach().cpu().numpy(), (1, 2, 0))
                 img_np = (img_np * 255).astype(np.uint8)
                 img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-                
-                # It is better to draw on a copy
+
                 img_to_draw = img_np.copy()
-                
                 h, w = img_to_draw.shape[:2]
                 for i in range(pre.shape[1] // 2):
                     x = int(max(0, min(1, pre[0, i * 2])) * w) if pre[0, i * 2] >= 0 else -1
@@ -447,7 +484,7 @@ class Task():
                         cv2.circle(img_to_draw, (x, y), 3, (255, 0, 0), 2)
                 cv2.imwrite(os.path.join(save_dir, basename), img_to_draw)
 
-                # debug dumps
+                # —— 调试图（与旧版一致：4 张）—— #
                 hm, ct, rg, of = _split_pred_tensors(out_dict)
                 hm = hm[0]; ct = ct[0]; rg = rg[0]
                 H_vis = self.img_size; W_vis = self.img_size
@@ -461,10 +498,13 @@ class Task():
                 cv2.imwrite(os.path.join(save_dir, basename[:-4] + "_regs0.jpg"),
                             cv2.resize(rg[0] * 255, (W_vis, H_vis)))
 
+    # -------------------------
+    # >>> evaluation (mean acc)
+    # -------------------------
     def evaluate(self, data_loader):
         self.model.eval()
-        correct = 0
-        total = 0
+        right_count = np.zeros(self.cfg['num_classes'], dtype=np.int64)
+        total_count = 0
         with torch.no_grad():
             for batch_idx, (imgs, labels, kps_mask, img_names) in enumerate(data_loader):
                 imgs = imgs.to(self.device)
@@ -477,13 +517,18 @@ class Task():
                 pre = movenetDecode(out_dict, kps_mask, mode='output')
                 gt  = movenetDecode(labels,  kps_mask, mode='label')
                 acc = myAcc(pre, gt)
-                correct += sum(acc)
-                total += len(acc)
-        acc = correct / total
-        print('[Info] acc: %.3f%%\n' % (100. * acc))
 
-    # ===== model IO =====
-    def modelLoad(self, model_path, data_parallel=False):
-        self.model.load_state_dict(torch.load(model_path), strict=True)
-        if data_parallel:
-            self.model = torch.nn.DataParallel(self.model)
+                right_count += acc
+                total_count += labels.shape[0]
+
+        mean_acc = float(np.mean(right_count / max(1, total_count)))
+        print('[Info] acc: %.3f%%\n' % (100. * mean_acc))
+
+    # -------------------------
+    # >>> model IO
+    # -------------------------
+    def modelLoad(self, model_path, data_parallel: bool = False):
+        state = torch.load(model_path, map_location=self.device)
+        self.model.load_state_dict(state, strict=True)
+        if data_parallel and torch.cuda.device_count() > 1:
+            self.model = torch.nn.DataParallel(self.model).to(self.device)
