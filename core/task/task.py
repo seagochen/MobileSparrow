@@ -427,17 +427,25 @@ class Task():
                 _, out_dict = self._align_output_for_loss_and_decode(output)
 
                 pre = movenetDecode(out_dict, None, mode='output')
-                basename = os.path.basename(img_name[0])
-
+                
+                # Corrected line: access the string inside the list
+                basename = img_name[0][0]
+                
                 img_np = np.transpose(img[0].cpu().numpy(), (1, 2, 0))
+                # Convert from [0,1] float to [0,255] uint8
+                img_np = (img_np * 255).astype(np.uint8)
                 img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-                h, w = img_np.shape[:2]
+                
+                # It is better to draw on a copy
+                img_to_draw = img_np.copy()
+                
+                h, w = img_to_draw.shape[:2]
                 for i in range(pre.shape[1] // 2):
                     x = int(max(0, min(1, pre[0, i * 2])) * w) if pre[0, i * 2] >= 0 else -1
                     y = int(max(0, min(1, pre[0, i * 2 + 1])) * h) if pre[0, i * 2 + 1] >= 0 else -1
                     if x >= 0 and y >= 0:
-                        cv2.circle(img_np, (x, y), 3, (255, 0, 0), 2)
-                cv2.imwrite(os.path.join(save_dir, basename), img_np)
+                        cv2.circle(img_to_draw, (x, y), 3, (255, 0, 0), 2)
+                cv2.imwrite(os.path.join(save_dir, basename), img_to_draw)
 
                 # debug dumps
                 hm, ct, rg, of = _split_pred_tensors(out_dict)

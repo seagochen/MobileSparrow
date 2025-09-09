@@ -10,6 +10,7 @@ Unified COCO Keypoints dataset for MoveNet-style training
 
 import json
 import os
+from pathlib import Path
 from typing import List, Tuple, Dict, Any
 
 import cv2
@@ -93,7 +94,6 @@ def _get_center_from_kps(kps_xyv: np.ndarray) -> Tuple[float, float]:
     """kps_xyv: [17,3]，只用 v>0 的点做均值"""
     vis = kps_xyv[:, 2] > 0
     if vis.sum() == 0:
-        # 如果都不可见，退化到直接平均全部（避免 nan）
         cx = kps_xyv[:, 0].mean()
         cy = kps_xyv[:, 1].mean()
     else:
@@ -270,7 +270,7 @@ class CocoKeypointsDataset(Dataset):
             if kps_mask[j] > 0:
                 dx = kps_f[j, 0] - cx
                 dy = kps_f[j, 1] - cy
-                regs[2 * j,     cy_i, cx_i] = float(np.floor(dx))  # 与你现有 loss 对齐：取整 + 0.5 再加回
+                regs[2 * j,     cy_i, cx_i] = float(np.floor(dx))
                 regs[2 * j + 1, cy_i, cx_i] = float(np.floor(dy))
 
         # 计算 offsets（在每个关键点所在网格记录小数偏移）
@@ -309,23 +309,21 @@ class CocoKeypointsDataset(Dataset):
         for a in anns:
             if a is not person:
                 all_kps.append(np.array(a["keypoints"], dtype=np.float32).reshape(-1, 3))
+
         # —— 先做几何增广（原图坐标系）——
         if self.is_train:
             img, kp = self._augment_geom(img, kp)
 
-        # 其它人的关键点也要跟着同样的仿射（上面 _augment_geom 返回的仿射矩阵没直接暴露，
-        # 这里简化做法：只对“被选中者”做几何增广，heatmap 仅来自被选中者；若你希望把所有人的 heatmap 累加，
-        # 可把 _augment_geom 调整为返回 M，并同步应用到 all_kps。）
-        all_kps = [kp]  # 此处只保留被选中者，避免错配
+        # 简化：只保留被选中者，避免错配
+        all_kps = [kp]
 
-        # —— 颜色增广 ——
+        # —— 颜色增广 —— 
         if self.is_train and self.use_color_aug:
-            # 注意：此处 img 还是 RGB，如果你更习惯在 BGR 里做 HSV，可先转 BGR 再转回。
             bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             bgr = _apply_hsv(bgr, hgain=0.015, sgain=0.7, vgain=0.4)
             img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-        # —— letterbox 到正方形输入 ——
+        # —— letterbox 到正方形输入 —— 
         img_lb, scale, (pad_w, pad_h) = _letterbox(img, self.img_size, color=(114, 114, 114))
 
         # 把关键点映射到 letterbox 后坐标
@@ -340,7 +338,6 @@ class CocoKeypointsDataset(Dataset):
         cx, cy = _get_center_from_kps(mapped_all[0])
 
         # —— 生成 supervision（特征图尺度）——
-        # heatmaps 可按需对所有人累加，这里用被选中者（和你的 loss/decoder 更一致）
         heatmaps, centers, regs, offsets, kps_mask = self._encode_targets(mapped_all[0], (cx, cy))
 
         # label 拼接
@@ -366,8 +363,8 @@ class CoCo2017DataLoader:
         self.num_workers = int(cfg.get("num_workers", 8))
         self.pin_memory = bool(cfg.get("pin_memory", True))
 
-        self.train_img_path = cfg["img_path"]
-        self.val_img_path = cfg["img_path"]  # 若验证集图像和训练集同目录，可共用
+        # 原始配置路径（通常是 ./data/coco2017）
+        self.root = Path(cfg["img_path"])
         self.train_label_path = cfg["train_label_path"]
         self.val_label_path = cfg["val_label_path"]
 
@@ -384,9 +381,23 @@ class CoCo2017DataLoader:
             select_person=cfg.get("select_person", "largest"),
         )
 
+    def _resolve_roots(self) -> Tuple[str, str]:
+        """
+        自动识别 train/val 子目录；若不存在，回退到根目录。
+        """
+        train_root = self.root / "train2017"
+        val_root = self.root / "val2017"
+        if train_root.is_dir() and val_root.is_dir():
+            return str(train_root), str(val_root)
+        # 回退
+        return str(self.root), str(self.root)
+
+
     def getTrainValDataloader(self) -> Tuple[DataLoader, DataLoader]:
+        train_img_root, val_img_root = self._resolve_roots()
+
         train_set = CocoKeypointsDataset(
-            img_root=self.train_img_path,
+            img_root=train_img_root,
             ann_path=self.train_label_path,
             img_size=self.img_size,
             target_stride=self.target_stride,
@@ -394,7 +405,7 @@ class CoCo2017DataLoader:
             **self.aug,
         )
         val_set = CocoKeypointsDataset(
-            img_root=self.val_img_path,
+            img_root=val_img_root,
             ann_path=self.val_label_path,
             img_size=self.img_size,
             target_stride=self.target_stride,
@@ -410,6 +421,22 @@ class CoCo2017DataLoader:
             scale_range=(1.0, 1.0),
             select_person=self.aug["select_person"],
         )
+
+        # 健壮性检查
+        if len(train_set) == 0:
+            raise ValueError(
+                f"Train dataset is empty. Check paths:\n"
+                f"  img_root={train_img_root}\n"
+                f"  ann_path={self.train_label_path}\n"
+                f"以及 COCO JSON 里的 file_name 与实际文件是否匹配。"
+            )
+        if len(val_set) == 0:
+            raise ValueError(
+                f"Val dataset is empty. Check paths:\n"
+                f"  img_root={val_img_root}\n"
+                f"  ann_path={self.val_label_path}\n"
+                f"以及 COCO JSON 里的 file_name 与实际文件是否匹配。"
+            )
 
         train_loader = DataLoader(
             train_set,
@@ -427,10 +454,12 @@ class CoCo2017DataLoader:
             pin_memory=self.pin_memory,
             drop_last=False,
         )
+
+        print(f"[INFO] Train root: {train_img_root}")
+        print(f"[INFO] Val   root: {val_img_root}")
         print(f"[INFO] Total train images: {len(train_set)}, val images: {len(val_set)}")
         return train_loader, val_loader
 
-    # 可选的可视化/调试函数
     @staticmethod
     def preview_label(label_t: torch.Tensor, save_path: str):
         """快速把 label 的热图合成可视化存盘（用于调试）"""

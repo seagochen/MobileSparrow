@@ -12,17 +12,28 @@ Unified CLI for MoveNet project:
 依赖：PyTorch、opencv-python、numpy、onnx(导出时)、onnxruntime(可选验证)
 """
 
+import os
 import argparse
+import glob
 import json
 import random
 from pathlib import Path
 from typing import Any, Dict
 
+import cv2
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
-from core import init, CoCo2017DataLoader, MoveNet, Task
+import core
+from core.predictor import run_prediction
+from core.task.task import Task
+from core.models.movenet import MoveNet
+from core.models.dummy_movenet import DummyMoveNet
+from core.dataloader.dataloader import CoCo2017DataLoader
+from core.dataloader.simple_loader import SimpleImageFolder
 
+import tqdm  
 
 # ----------------------------------------------------------------------
 # 工具
@@ -72,7 +83,7 @@ def build_data(cfg: Dict[str, Any]):
 # 子命令：train
 # ----------------------------------------------------------------------
 def cmd_train(cfg: Dict[str, Any]):
-    init(cfg)
+    core.init(cfg)
     set_seed(cfg.get("random_seed", 42))
     ensure_dir(cfg["save_dir"])
 
@@ -87,12 +98,12 @@ def cmd_train(cfg: Dict[str, Any]):
 # 子命令：eval
 # ----------------------------------------------------------------------
 def cmd_eval(cfg: Dict[str, Any], weights: str):
-    init(cfg)
+    core.init(cfg)
     set_seed(cfg.get("random_seed", 42))
 
     model = build_model(cfg)
     data = build_data(cfg)
-    val_loader = data.getEvalDataloader()
+    _, val_loader = data.getTrainValDataloader()
 
     task = Task(cfg, model)
     if not weights:
@@ -103,37 +114,65 @@ def cmd_eval(cfg: Dict[str, Any], weights: str):
 # ----------------------------------------------------------------------
 # 子命令：predict（简单演示，复用你 Task.predict 时的可视化）
 # ----------------------------------------------------------------------
-def cmd_predict(cfg: Dict[str, Any], images_dir: str, out_dir: str):
-    init(cfg)
-    set_seed(cfg.get("random_seed", 42))
-    ensure_dir(out_dir)
+def cmd_predict(cfg, images_dir, out_dir):
+    # args.images 是图像目录，args.out 是输出目录
+    img_paths = glob.glob(os.path.join(images_dir, '*.jpg')) + \
+                glob.glob(os.path.join(images_dir, '*.png'))
+    
+    if not img_paths:
+        print(f"[Error] No images found in directory: {args.images}")
+        return
 
+    os.makedirs(out_dir, exist_ok=True)
+    
+    # 将模型设置为评估模式
     model = build_model(cfg)
     task = Task(cfg, model)
-    # 默认加载 best.pt
-    weights = str(Path(cfg["save_dir"]) / "best.pt")
-    task.modelLoad(weights)
+    task.model.eval()
+    
+    print(f"Starting prediction for {len(img_paths)} images...")
+    
+    for img_path in tqdm.tqdm(img_paths):
+        try:
+            # 调用全新的预测函数
+            result_image = run_prediction(task.model, 
+                                          img_path, 
+                                          task.device, 
+                                          task.cfg)
+            
+            # 保存结果
+            save_path = os.path.join(out_dir, os.path.basename(img_path))
+            cv2.imwrite(save_path, result_image)
 
-    data = build_data(cfg)
-    loader = data.getTestDataloader(images_dir)  # 如无此函数，可自行按你项目补齐
-    task.predict(loader, out_dir)
+        except Exception as e:
+            print(f"\n[Error] Failed to process {os.path.basename(img_path)}: {e}")
+            
+    print(f"Prediction complete. Results saved to: {out_dir}")
 
+    
 # ----------------------------------------------------------------------
 # 子命令：export-onnx
 # ----------------------------------------------------------------------
 def cmd_export_onnx(cfg: Dict[str, Any], weights: str, out_path: str,
                     opset: int, dynamic: bool, verify: bool):
-    init(cfg)
+    """
+    导出 ONNX：
+      - 默认导出 4 个头（heatmaps/centers/regs/offsets）
+      - 若 cfg["export_keypoints"] 为 True，则导出关键点版单头 [B, 51]，即 (x,y,score)*17
+        - 坐标为归一化到 0~1
+        - score 为对应关节 heatmap 处的峰值
+    """
+    # 这些工具函数/类按你工程里的位置来
+    core.init(cfg)
     set_seed(cfg.get("random_seed", 42))
     ensure_dir(Path(out_path).parent)
 
     model = build_model(cfg)
     task = Task(cfg, model)
 
+    # 自动挑选权重：best.pt 优先，否则 last.pt
     if not weights:
-        # 优先 best.pt，否则 last.pt
-        candidates = [Path(cfg["save_dir"]) / "best.pt", Path(cfg["save_dir"]) / "last.pt"]
-        for c in candidates:
+        for c in (Path(cfg["save_dir"]) / "best.pt", Path(cfg["save_dir"]) / "last.pt"):
             if c.exists():
                 weights = str(c)
                 break
@@ -142,25 +181,12 @@ def cmd_export_onnx(cfg: Dict[str, Any], weights: str, out_path: str,
 
     task.modelLoad(weights)
     task.model.eval()
+
     device = torch.device("cuda" if (cfg.get("GPU_ID", "") != "" and torch.cuda.is_available()) else "cpu")
     task.model.to(device)
 
     h = w = int(cfg.get("img_size", 192))
     dummy = torch.randn(1, 3, h, w, device=device)
-
-    # 约定：MoveNet.forward 返回 dict
-    # 导出 4 个命名输出：heatmaps / centers / regs / offsets
-    print(f"[INFO] Exporting to ONNX: {out_path} (opset={opset}, dynamic={dynamic})")
-    out_names = ["heatmaps", "centers", "regs", "offsets"]
-    dynamic_axes = None
-    if dynamic:
-        dynamic_axes = {
-            "input": {0: "batch", 2: "height", 3: "width"},
-            "heatmaps": {0: "batch", 2: "h", 3: "w"},
-            "centers":  {0: "batch", 2: "h", 3: "w"},
-            "regs":     {0: "batch", 2: "h", 3: "w"},
-            "offsets":  {0: "batch", 2: "h", 3: "w"},
-        }
 
     # 需要 onnx
     try:
@@ -168,26 +194,75 @@ def cmd_export_onnx(cfg: Dict[str, Any], weights: str, out_path: str,
     except Exception:
         raise RuntimeError("缺少 onnx，请先安装：pip install onnx")
 
-    # 包一层 wrapper 把 dict 按固定顺序展开
-    class _Wrapper(torch.nn.Module):
-        def __init__(self, m): super().__init__(); self.m = m
-        def forward(self, x):
-            y = self.m(x)
-            return y["heatmaps"], y["centers"], y["regs"], y["offsets"]
+    use_keypoints = bool(cfg.get("export_keypoints", False))
+    print(f"[INFO] Exporting to ONNX: {out_path} (opset={opset}, dynamic={dynamic}, keypoints={use_keypoints})")
 
-    wrapper = _Wrapper(task.model).to(device).eval()
+    if use_keypoints:
+        # --- 关键点版导出：单一输出 [B, 51] ---
+        # 惰性导入，以免训练路径无该依赖时报错
+        wrapper = DummyMoveNet(
+            movenet=task.model,
+            num_joints=int(cfg.get("num_classes", 17)),
+            img_size=int(cfg.get("img_size", 192)),
+            target_stride=int(cfg.get("target_stride", 4)),
+            hm_th=float(cfg.get("hm_th", 0.1)),
+        ).to(device).eval()
 
-    torch.onnx.export(
-        wrapper,
-        dummy,
-        out_path,
-        input_names=["input"],
-        output_names=out_names,
-        opset_version=opset,
-        do_constant_folding=True,
-        dynamic_axes=dynamic_axes,
-        verbose=False,
-    )
+        out_names = ["keypoints"]
+        dynamic_axes = None
+        if dynamic:
+            dynamic_axes = {
+                "input":     {0: "batch", 2: "height", 3: "width"},
+                "keypoints": {0: "batch"},  # [B, 51]
+            }
+
+        torch.onnx.export(
+            wrapper,
+            dummy,
+            out_path,
+            input_names=["input"],
+            output_names=out_names,
+            opset_version=opset,
+            do_constant_folding=True,
+            dynamic_axes=dynamic_axes,
+            verbose=False,
+        )
+
+    else:
+        # --- 保持原有 4 头导出（便于外部后处理） ---
+        class _Wrapper(torch.nn.Module):
+            def __init__(self, m):
+                super().__init__();
+                self.m = m
+            def forward(self, x):
+                y = self.m(x)  # dict
+                return y["heatmaps"], y["centers"], y["regs"], y["offsets"]
+
+        wrapper = _Wrapper(task.model).to(device).eval()
+
+        out_names = ["heatmaps", "centers", "regs", "offsets"]
+        dynamic_axes = None
+        if dynamic:
+            dynamic_axes = {
+                "input":   {0: "batch", 2: "height", 3: "width"},
+                "heatmaps":{0: "batch", 2: "h", 3: "w"},
+                "centers": {0: "batch", 2: "h", 3: "w"},
+                "regs":    {0: "batch", 2: "h", 3: "w"},
+                "offsets": {0: "batch", 2: "h", 3: "w"},
+            }
+
+        torch.onnx.export(
+            wrapper,
+            dummy,
+            out_path,
+            input_names=["input"],
+            output_names=out_names,
+            opset_version=opset,
+            do_constant_folding=True,
+            dynamic_axes=dynamic_axes,
+            verbose=False,
+        )
+
     print(f"[OK] ONNX saved to: {out_path}")
 
     if verify:
@@ -195,50 +270,86 @@ def cmd_export_onnx(cfg: Dict[str, Any], weights: str, out_path: str,
             import onnxruntime as ort
             sess = ort.InferenceSession(out_path, providers=['CUDAExecutionProvider','CPUExecutionProvider'])
             outs = sess.run(None, {"input": dummy.detach().cpu().numpy()})
-            assert len(outs) == 4 and all(isinstance(o, np.ndarray) for o in outs)
+            if use_keypoints:
+                assert len(outs) == 1 and outs[0].ndim == 2 and outs[0].shape[1] == int(cfg.get("num_classes", 17)) * 3
+            else:
+                assert len(outs) == 4 and all(isinstance(o, np.ndarray) for o in outs)
             print("[OK] ONNXRuntime quick check passed.")
         except Exception as e:
             print(f"[WARN] onnxruntime 验证失败（可忽略）：{e}")
+
 
 # ----------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------
 def build_parser():
-    p = argparse.ArgumentParser(description="MoveNet Unified CLI")
-    p.add_argument("--config", type=str, default="config.json", help="路径：JSON 配置文件")
-    p.add_argument("--save-dir", type=str, help="覆盖 cfg.save_dir")
-    p.add_argument("--img-size", type=int, help="覆盖 cfg.img_size")
-    p.add_argument("--num-classes", type=int, help="覆盖 cfg.num_classes")
-    p.add_argument("--width-mult", type=float, help="覆盖 cfg.width_mult")
+    epilog_msg = """
+示例:
+  # 使用默认配置训练
+  python movenet_cli.py --config config.json train --epochs 50 --batch-size 64
+
+  # 在验证集上评估
+  python movenet_cli.py --config config.json eval --weights output/best.pt
+
+  # 对目录中的图片预测并可视化到 output_vis/
+  python movenet_cli.py --config config.json predict --images ./test_imgs --out ./output_vis
+
+  # 导出 ONNX (默认4头)
+  python movenet_cli.py --config config.json export-onnx --out output/movenet.onnx
+
+  # 导出关键点版 ONNX (单一输出 [B,51])
+  python movenet_cli.py --config config.json export-onnx --keypoints --out output/movenet_kps.onnx
+
+  # 打印合并后的配置
+  python movenet_cli.py --config config.json show-config
+"""
+    p = argparse.ArgumentParser(
+        description="MoveNet Unified CLI (train/eval/predict/export/show-config)",
+        epilog=epilog_msg,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument("--config", type=str, default="config.json", help="路径: JSON 配置文件")
+    p.add_argument("--save-dir", type=str, help="覆盖 cfg.save_dir (保存权重与结果)")
+    p.add_argument("--img-size", type=int, help="覆盖 cfg.img_size (输入图像大小, 默认192)")
+    p.add_argument("--num-classes", type=int, help="覆盖 cfg.num_classes (关键点个数, 默认17)")
+    p.add_argument("--width-mult", type=float, help="覆盖 cfg.width_mult (backbone 宽度倍率, 默认1.0)")
     p.add_argument("--backbone", type=str, help="覆盖 cfg.backbone (mobilenet_v2 / shufflenet_v2)")
-    p.add_argument("--gpu-id", type=str, help="覆盖 cfg.GPU_ID（''=CPU）")
+    p.add_argument("--gpu-id", type=str, help="覆盖 cfg.GPU_ID (''=CPU, '0'=第0张GPU)")
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp_tr = sub.add_parser("train", help="训练")
-    # 训练超参也可用 CLI 覆盖
-    sp_tr.add_argument("--epochs", type=int)
-    sp_tr.add_argument("--batch-size", type=int)
-    sp_tr.add_argument("--lr", type=float)
-    sp_tr.add_argument("--optimizer", type=str)
-    sp_tr.add_argument("--scheduler", type=str)
+    # ========== train ==========
+    sp_tr = sub.add_parser("train", help="训练模型并保存权重 (last.pt / best.pt)")
+    sp_tr.add_argument("--epochs", type=int, help="训练轮数 (覆盖配置文件)")
+    sp_tr.add_argument("--batch-size", type=int, help="批大小 (覆盖配置文件)")
+    sp_tr.add_argument("--lr", type=float, help="学习率 (覆盖配置文件)")
+    sp_tr.add_argument("--optimizer", type=str, help="优化器 (Adam / SGD)")
+    sp_tr.add_argument("--scheduler", type=str, help="学习率调度器, 如 'MultiStepLR-70,100-0.1'")
 
-    sp_ev = sub.add_parser("eval", help="验证集评估")
-    sp_ev.add_argument("--weights", type=str, help="权重路径（默认用 save_dir/best.pt）")
+    # ========== eval ==========
+    sp_ev = sub.add_parser("eval", help="在验证集上评估模型")
+    sp_ev.add_argument("--weights", type=str, help="权重路径 (默认 save_dir/best.pt)")
 
-    sp_pr = sub.add_parser("predict", help="目录预测与可视化（需要你 Data 中相应方法）")
-    sp_pr.add_argument("--images", type=str, required=True, help="图片目录")
-    sp_pr.add_argument("--out", type=str, required=True, help="输出目录（可视化）")
+   # ========== predict ==========
+    sp_pr = sub.add_parser("predict", help="对目录中的图片进行预测与可视化")
+    sp_pr.add_argument("--images", type=str, required=True, help="输入图片目录")
+    sp_pr.add_argument("--out", type=str, required=True, help="输出目录 (保存可视化结果)")
 
-    sp_ex = sub.add_parser("export-onnx", help="导出 ONNX")
-    sp_ex.add_argument("--weights", type=str, help="权重（默认 best.pt / last.pt）")
-    sp_ex.add_argument("--out", type=str, default="output/core.onnx", help="ONNX 路径")
-    sp_ex.add_argument("--opset", type=int, default=13)
-    sp_ex.add_argument("--dynamic", action="store_true", help="导出动态高宽/批次")
-    sp_ex.add_argument("--verify", action="store_true", help="导出后用 onnxruntime 快速校验")
+    # ========== export-onnx ==========
+    sp_ex = sub.add_parser("export-onnx", help="导出 ONNX 模型文件")
+    sp_ex.add_argument("--weights", type=str, help="权重路径 (默认 best.pt / last.pt)")
+    sp_ex.add_argument("--out", type=str, default="output/movenet.onnx", help="导出 ONNX 文件路径")
+    sp_ex.add_argument("--opset", type=int, default=13, help="ONNX opset 版本 (默认 13)")
+    sp_ex.add_argument("--dynamic", action="store_true", help="导出动态 batch/height/width")
+    sp_ex.add_argument("--verify", action="store_true", help="导出后用 onnxruntime 进行推理校验")
+    sp_ex.add_argument("--keypoints", action="store_true",
+                       help="导出关键点版 ONNX (输出[B,51]=(x,y,score)*17)")
 
-    sub.add_parser("show-config", help="打印最终配置")
+    # ========== show-config ==========
+    sub.add_parser("show-config", help="打印最终合并后的配置 (JSON 格式)")
+
     return p
+
 
 def main():
     parser = build_parser()

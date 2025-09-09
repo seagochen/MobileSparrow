@@ -11,6 +11,7 @@ import torch
 from core.dataloader.dataloader import CoCo2017DataLoader
 from core.task.task import Task
 from core.models.movenet import MoveNet
+from core.models.dummy_movenet import DummyMoveNet
 
 
 def setRandomSeed(seed=42):
