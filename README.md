@@ -38,10 +38,10 @@ $ tree -L 2
 
 ```bash
 # 1) By default, the original COCO split is used (train/val are exported separately)
-python python scripts/make_coco2017_for_movenet.py
+python scripts/make_coco2017_for_movenet.py
 
 # 2) After merging the COCO (that you specify), randomly re-split into train/test according to the ratio
-python python scripts/make_coco2017_for_movenet.py \
+python scripts/make_coco2017_for_movenet.py \
   --split-strategy random \
   --splits train,val \
   --train-ratio 0.9 \

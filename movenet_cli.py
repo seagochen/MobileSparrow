@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 
 import core
 from core.datasets.simple_loader import SimpleImageFolder
-from core.datasets.coco_kpts import CoCo2017DataLoader
+from core.datasets.coco_loader import CoCo2017KptsDataLoader
 from core.task.task_kpts import KptsTask
 from core.models.movenet import MoveNet
 from core.models.onnx.dummy_movenet import DummyMoveNet
@@ -75,7 +75,7 @@ def build_model(cfg: Dict[str, Any]) -> torch.nn.Module:
     return model
 
 def build_data(cfg: Dict[str, Any]):
-    return CoCo2017DataLoader(cfg)
+    return CoCo2017KptsDataLoader(cfg)
 
 # ----------------------------------------------------------------------
 # 子命令：train
@@ -86,7 +86,7 @@ def cmd_train(cfg: Dict[str, Any]):
     ensure_dir(cfg["save_dir"])
 
     model: torch.nn.Module = build_model(cfg)
-    data: CoCo2017DataLoader = build_data(cfg)
+    data: CoCo2017KptsDataLoader = build_data(cfg)
     train_loader, val_loader = data.getTrainValDataloader()
 
     # 创建任务

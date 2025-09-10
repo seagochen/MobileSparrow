@@ -143,7 +143,7 @@ def det_collate_fn(batch):
 def create_coco_det_loaders(cfg: Dict[str, Any],
                             only_person: bool = False) -> Tuple[DataLoader, DataLoader, int]:
     from pathlib import Path
-    root = Path(cfg["img_path"])
+    root = Path(cfg["dataset_root_path"])
     train_root = str(root / "train2017") if (root / "train2017").is_dir() else str(root)
     val_root   = str(root / "val2017")   if (root / "val2017").is_dir()   else str(root)
 
