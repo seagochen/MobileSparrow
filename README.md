@@ -1,92 +1,112 @@
-# Movenet.Pytorch
+# MobileSparrow
 
-[![license](https://img.shields.io/github/license/mashape/apistatus.svg?maxAge=2592000)](https://github.com/fire717/Fire/blob/main/LICENSE) 
+Lightweight human pose & object detection toolkit (MoveNet + SSDLite) for mobile/edge and server, built with PyTorch.
 
-## Intro
+
+[![license](https://img.shields.io/github/license/mashape/apistatus.svg?maxAge=2592000)](https://github.com/fire717/Fire/blob/main/LICENSE)
+
+Originally a MoveNet (17 keypoints) re-implementation, now extended to **MobileNet/ShuffleNet + FPN-Lite + SSDLite** for multi-object detection — all under a unified config/loader pipeline.
+
 ![start](/data/imgs/three_pane_aligned.gif)
 
-MoveNet is an ultra fast and accurate model that detects 17 keypoints of a body.
-This is A Pytorch implementation of MoveNet from Google. Include training code and pre-train model.
+---
 
-Google just release pre-train models(tfjs or tflite), which cannot be converted to some CPU inference framework such as NCNN,Tengine,MNN,TNN, and we can not add our own custom data to finetune, so there is this repo.
+## ✨ What’s New
 
+* **Modular model layout**: `backbone (MobileNetV2 / ShuffleNetV2)` + `neck (FPN-Lite)` + `head (MoveNet / SSDLite)`
+* **Unified config & loader**: one JSON toggles `"task": "kpts" | "det" | "cls"`; aligned data augmentations across tasks
+* **Lean data prep scripts**: keep **official COCO train/val splits** only (no random re-split); detection script supports class subset filtering
+* **Two CLIs**: `movenet_cli.py` (pose) and `ssdlite_cli.py` (detection) with `train / eval / predict / export-onnx`
+* **ONNX export (detection)**: export `cls_logits / bbox_regs / anchors` for portable post-processing (decode/NMS outside)
+* **Stability fixes**: lazy-built detection heads now auto-move to the right device; loss logging avoids `requires_grad` warnings
 
-## How To Run
+---
 
-1. Download COCO dataset2017 from https://cocodataset.org/. Or Use the following script to automatically download the dataset into the right place.
+## 0) Dependencies (example)
+
+```bash
+pip install torch torchvision
+pip install opencv-python numpy
+pip install pycocotools onnx onnxruntime   # optional for eval/export
+```
+
+---
+
+## 1) COCO2017 Layout
+
+Download COCO2017 (or use the helper script):
 
 ```bash
 ./scripts/get_coco2017.sh
 ```
 
-After the download is finished, cd to `data` directory and verify the data structure whether it is correct.
+Expected structure:
 
-```bash
-$ tree -L 2
-.
-├── coco2017
-│   ├── annotations
-│   ├── train2017
-│   └── val2017
-└── imgs
-    ├── bad.png
-    ├── good.png
-    └── three_pane_aligned.gif
+```
+data/
+└── coco2017
+    ├── annotations
+    │   ├── instances_train2017.json
+    │   ├── instances_val2017.json
+    │   ├── person_keypoints_train2017.json
+    │   └── person_keypoints_val2017.json
+    ├── train2017
+    └── val2017
 ```
 
-2. Use the following script to prepare the data:
+---
+
+## 2) Data Preparation (lean scripts)
+
+### 2.1 MoveNet (single-person square crops)
+
+Uses official train/val only; filters instances with too few visible keypoints; crops a square that covers `bbox ∪ visible_keypoints` (with padding if needed).
 
 ```bash
-# 1) By default, the original COCO split is used (train/val are exported separately)
-python scripts/make_coco2017_for_movenet.py
-
-# 2) After merging the COCO (that you specify), randomly re-split into train/test according to the ratio
 python scripts/make_coco2017_for_movenet.py \
-  --split-strategy random \
-  --splits train,val \
-  --train-ratio 0.9 \
-  --seed 42 \
-  --expand-ratio 1.25 \
-  --min-visible-kpts 8 \
   --root ./data/coco2017 \
-  --out-dir ./data/coco2017_movenet_sp
+  --out-dir ./data/coco2017_movenet_sp \
+  --splits train,val \
+  --min-visible-kpts 8 \
+  --expand-ratio 1.0 \
+  --jpeg-quality 95
 ```
 
-保留 COCO 原始划分，仅过滤 crowd、小框，且只保留 person 类（类名过滤）并用软链接省空间：
+Output (plug-and-play with the loader):
 
-python make_coco2017_for_ssdlite.py \
-  --root ./data/coco2017 \
-  --out-dir ./data/coco2017_det_person \
-  --split-strategy coco \
-  --class-names person \
-  --skip-crowd \
-  --min-box-area 16 \
-  --copy-mode symlink
+```
+data/coco2017_movenet_sp/
+├── images/{train2017,val2017}/*.jpg
+└── annotations/{person_keypoints_train2017.json, person_keypoints_val2017.json}
+```
 
+### 2.2 SSDLite (object detection)
 
-做一个 5 类子集（person, car, bicycle, dog, chair），随机 9:1 重划分 train/test，并拷贝+重编码压缩图片：
+Keeps official train/val; optional **class subset** filtering; skips crowd & tiny boxes; supports copy/symlink/none.
 
-python make_coco2017_for_ssdlite.py \
+```bash
+# keep five classes: person, car, bicycle, dog, chair
+python scripts/make_coco2017_for_ssdlite.py \
   --root ./data/coco2017 \
   --out-dir ./data/coco2017_det_5cls \
-  --splits train,val \
-  --split-strategy random --train-ratio 0.9 --seed 42 \
   --class-names person,car,bicycle,dog,chair \
-  --skip-crowd --min-box-area 25 \
-  --copy-mode copy --reencode --jpeg-quality 92
+  --skip-crowd --min-box-area 16 \
+  --copy-mode symlink
+```
 
+> You may also keep all classes at data stage and restrict classes **at train time** via `task_params.class_filter` (e.g. `[1]` for person-only).
 
-使用类ID过滤（例如只保留类别 id=1 和 3）：
+Output:
 
-python make_coco2017_for_ssdlite.py \
-  --root ./data/coco2017 \
-  --out-dir ./data/coco2017_det_cls13 \
-  --class-ids 1,3 --skip-crowd --copy-mode symlink
+```
+data/coco2017_det_5cls/
+├── images/{train2017,val2017}/*.jpg
+└── annotations/{instances_train2017.json, instances_val2017.json}
+```
 
+---
 
-3. You can add your own data to the same format.
-
-4. Before training your own model, prepare the configuration json file first.
+## 3) Unified Config (one JSON for three tasks)
 
 ```json
 {
@@ -96,20 +116,20 @@ python make_coco2017_for_ssdlite.py \
 
   "task": "kpts",                         // "kpts" | "det" | "cls"
   "task_params": {
-    "num_joints": 17,                     // Only for 'kpts' task
-    "export_keypoints": true,             // Only for 'kpts' task
-    "class_agnostic_nms": false,          // Only for 'det' task
-    "class_filter": [],                   // Only for 'det' task
-    "cls_mode": "single_label"            // cls
+    "num_joints": 17,                     // kpts only
+    "export_keypoints": true,             // kpts only
+    "class_agnostic_nms": false,          // det only (inference)
+    "class_filter": [],                   // det only (e.g., [1] => person-only; omit/[] => all)
+    "cls_mode": "single_label"            // cls (future use)
   },
 
   "save_dir": "output/",
-  "dataset_root_path": "./data/coco2017",
+  "dataset_root_path": "./data/coco2017_movenet_sp",   // switch per task
 
   "backbone": "mobilenet_v2",
   "width_mult": 1.0,
   "img_size": 256,
-  "target_stride": 4,                     // Only for 'kpts' task
+  "target_stride": 4,                     // kpts only
 
   "use_color_aug": true,
   "use_flip": true,
@@ -117,9 +137,9 @@ python make_coco2017_for_ssdlite.py \
   "rotate_deg": 30.0,
   "use_scale": true,
   "scale_range": [0.75, 1.25],
-  "gaussian_radius": 2,                   // Only for 'kpts' task
-  "sigma_scale": 1.0,                     // Only for 'kpts' task
-  "select_person": "largest",             // Only for 'kpts' task
+  "gaussian_radius": 2,                   // kpts only
+  "sigma_scale": 1.0,                     // kpts only
+  "select_person": "largest",             // kpts only
 
   "pin_memory": true,
   "num_workers": 8,
@@ -132,45 +152,118 @@ python make_coco2017_for_ssdlite.py \
   "clip_gradient": 1.0,
   "log_interval": 10
 }
-
 ```
 
-5. After choose 
+**Notes**
 
+* Older configs that used `num_classes: 17` for “number of joints” are supported by code-side bridging, but new configs should set `task_params.num_joints`.
+* The loader now **expects `train2017` + `val2017` only** (no `test2017`). Wrong roots will error out early.
 
-## Training Results
+---
 
-#### Some good samples
-![good](/data/imgs/good.png)
+## 4) Train / Eval / Predict / Export
 
-#### Some bad cases
-![bad](/data/imgs/bad.png)
+### 4.1 MoveNet CLI
 
+```bash
+# train
+python movenet_cli.py --config configs/movenet_config.json train
 
-## Tips to improve
-#### 1. Focus on data
-* Add COCO2014. (But as I know it has some duplicate data of COCO2017, and I don't know if google use it.)
-* Clean the croped COCO2017 data. (Some img just have little points, such as big face, big body,etc.MoveNet is a small network, COCO data is a little hard for it.)
-* Add some yoga, fitness, and dance videos frame from YouTube. (Highly Recommened! Cause Google did this on their Movenet and said 'Evaluations on the Active validation dataset show a significant performance boost relative to identical architectures trained using only COCO. ')
+# eval (simple proxy metrics on val)
+python movenet_cli.py --config configs/movenet_config.json eval
 
-#### 2. Change backbone
-Try to ransfer Mobilenetv2(original Movenet) to Mobilenetv3 or Shufflenetv2 may get a litte improvement.If you just wanna reproduce the original Movenet, u can ignore this.
+# predict a folder and visualize
+python movenet_cli.py --config configs/movenet_config.json predict --images ./demo --out ./vis_kpts
 
-#### 3. More fancy loss
-Surely this is a muti-task learning. So add some loss to learn together may improve the performence. (Such as BoneLoss which I have added.) And we can never know how Google trained, cause we cannot see it from the pre-train tflite model file, so you can try any loss function you like.
+# export ONNX (with keypoint outputs; dummy wrapper supported)
+python movenet_cli.py --config configs/movenet_config.json export-onnx --out output/movenet.onnx
+```
 
+### 4.2 SSDLite CLI
 
-#### 4. Data Again
-I just wanna you know the importance of the data. The more time you spend on clean data and add new data, the better performance your model will get! (While tips 2 and 3 may not.)
+```bash
+# train (set "task": "det" in config; point dataset_root_path to your detection subset)
+python ssdlite_cli.py --config configs/ssdlite_config.json train
 
-## Resource
-1. [Blog:Next-Generation Pose Detection with MoveNet and TensorFlow.js](https://blog.tensorflow.org/2021/05/next-generation-pose-detection-with-movenet-and-tensorflowjs.html
-)
-2. [model card](https://storage.googleapis.com/movenet/MoveNet.SinglePose%20Model%20Card.pdf)
-3. [TFHub：movenet/singlepose/lightning
-](https://tfhub.dev/google/movenet/singlepose/lightning/4
-)
-4. [My article shared: 2021轻量级人体姿态估计模型修炼之路（附谷歌MoveNet复现经验）](https://zhuanlan.zhihu.com/p/413313925)
+# eval (simple proxy metrics on val)
+python ssdlite_cli.py --config configs/ssdlite_config.json eval --weights output/best.pt
 
+# predict a folder and visualize
+python ssdlite_cli.py --config configs/ssdlite_config.json predict --images ./demo --out ./vis_det
 
+# export ONNX (3 outputs)
+python ssdlite_cli.py --config configs/ssdlite_config.json export-onnx \
+  --out output/ssdlite.onnx --dynamic --verify
+```
 
+**ONNX (detection)**
+
+* Outputs:
+
+  * `cls_logits`: `[B, N, C]` (includes background)
+  * `bbox_regs` : `[B, N, 4]` (anchor deltas)
+  * `anchors`   : `[N, 4]` (cx, cy, w, h in \[0, 1])
+* Do decode & NMS on the deployment side for better portability.
+
+---
+
+## 5) Layout (high level)
+
+```
+core/
+  datasets/
+    coco_loader.py      # unified entry: kpts/det/cls (train+val only)
+    coco_kpts.py        # keypoints
+    coco_det.py         # detection (supports class_filter)
+    coco_cls.py         # classification (placeholder/extensions)
+    common.py           # letterbox, color/geom aug, etc.
+  models/
+    mobilenet_v2.py / shufflenet_v2.py
+    fpn_lite.py
+    ssdlite.py          # lazy head build (now auto device-moved)
+    heads/
+      ssd_head.py
+  loss/
+    ssd_loss.py         # logging uses .detach().item() (no warnings)
+scripts/
+  make_coco2017_for_movenet.py   # lean (official train/val)
+  make_coco2017_for_ssdlite.py   # lean (official train/val)
+movenet_cli.py
+ssdlite_cli.py
+```
+
+---
+
+## 6) FAQ
+
+* **RuntimeError: weight on CPU, input on CUDA**
+  SSDLite heads are lazily created on first forward. They’re now explicitly moved to the same device as features.
+
+* **UserWarning: Converting a tensor with requires\_grad=True to a scalar**
+  Fixed in `ssd_loss.py` by using `tensor.detach().item()` for logging while keeping `loss` as a Tensor.
+
+* **Val split missing**
+  Loader requires `train2017` + `val2017`. Check `dataset_root_path` and the `annotations/*_val2017.json`.
+
+---
+
+## 7) Training Tips
+
+* **Data matters most**: curate/clean data; add domain frames (yoga/fitness/dance)
+* **Backbones**: try MobileNetV3 / ShuffleNetV2 within your budget
+* **Losses**: for pose, consider skeleton priors; for detection, FocalLoss/GIoU can help (current setup is stable)
+
+---
+
+## 8) Resources
+
+1. Next-Generation Pose Detection with MoveNet and TensorFlow\.js
+2. MoveNet Model Card (PDF)
+3. TFHub: `movenet/singlepose/lightning`
+4. Article (Chinese): Lightweight Pose Estimation & MoveNet reproduction notes
+
+---
+
+## License
+
+MIT (see the badge link above)

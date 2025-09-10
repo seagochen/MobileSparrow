@@ -112,6 +112,13 @@ class SSDLoss(nn.Module):
                 total_reg += self.reg_loss(reg_pred, reg_gt).mean()
                 total_pos += pos_mask.sum().item()
 
-        # 平衡权重：分类 + α*回归（仅正样本）
+        # 最终损失仍是 Tensor，梯度稳定
         loss = total_cls + self.alpha * total_reg
-        return loss, {"loss_cls": float(total_cls), "loss_reg": float(total_reg), "pos": int(total_pos)}
+
+        # 仅用于日志展示：先脱离计算图，再转成 Python number
+        meter = {
+            "loss_cls": total_cls.detach().item(),
+            "loss_reg": total_reg.detach().item(),
+            "pos": int(total_pos),
+        }
+        return loss, meter
