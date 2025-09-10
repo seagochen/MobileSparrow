@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Optional, List
 import torch
 from torch.utils.data import DataLoader
 
@@ -10,14 +10,13 @@ from core.datasets.coco_cls import CocoClsDataset
 # ---------- det 专用 collate（可变数目标） ----------
 def det_collate_fn(batch):
     imgs, targets = zip(*batch)
-    imgs = torch.stack(imgs, 0)
-    return imgs, list(targets)
+    return torch.stack(imgs, 0), list(targets)
 
 # -----------------------
 # 统一对外封装
 # -----------------------
 class CoCo2017DataLoader:
-    def __init__(self, cfg: Dict[str, Any], 
+    def __init__(self, cfg: Dict[str, Any],
                  task: str = "kpts",
                  cls_mode: str = "single_label"):
         """
@@ -36,8 +35,12 @@ class CoCo2017DataLoader:
         self.num_workers = int(cfg.get("num_workers", 8))
         self.pin_memory = bool(cfg.get("pin_memory", True))
 
-        # 根路径（通常是 ./data/coco2017）
+        # 根路径（通常是 ./data/coco2017 或数据准备脚本的 out-dir）
         self.root = Path(cfg["dataset_root_path"])
+
+        # 任务参数（可选）
+        tp = cfg.get("task_params", {}) if isinstance(cfg.get("task_params", {}), dict) else {}
+        self.class_filter: Optional[List[int]] = tp.get("class_filter", None) if self.task == "det" else None
 
         # 增广配置（与 kpts 对齐）
         self.aug = dict(
@@ -53,31 +56,28 @@ class CoCo2017DataLoader:
         )
 
         # 运行后填充，供外部读取（det/cls 会写入具体类别数；kpts 为 None）
-        self.num_classes: int | None = None
+        self.num_classes: Optional[int] = None
 
     def _resolve_roots(self) -> Tuple[str, str]:
         """
-        自动识别 train/val 子目录；兼容:
+        仅接受官方/准备脚本导出的 train2017 + val2017 目录；兼容：
         - <root>/train2017, <root>/val2017
-        - <root>/images/train2017, <root>/images/(val2017|test2017)
-        - 如果都找不到，就回退到 <root>
+        - <root>/images/train2017, <root>/images/val2017
         """
         bases = [self.root, self.root / "images"]
         for base in bases:
             tr = base / "train2017"
             va = base / "val2017"
-            te = base / "test2017"
             if tr.is_dir() and va.is_dir():
                 return str(tr), str(va)
-            if tr.is_dir() and te.is_dir():
-                # 有的目录把验证集放 test2017，我们也做兼容
-                return str(tr), str(te)
-        return str(self.root), str(self.root)
+        raise FileNotFoundError(
+            f"Expected 'train2017' and 'val2017' under {self.root} or {self.root/'images'}; "
+            f"please run the data prep script to create them."
+        )
 
     def _ann_paths(self) -> Tuple[Path, Path]:
         ann_dir = self.root / "annotations"
         if self.task == "kpts":
-            # 注意：验证应使用 *val2017.json*，test 没有公开标注
             train = ann_dir / "person_keypoints_train2017.json"
             val   = ann_dir / "person_keypoints_val2017.json"
         else:
@@ -122,6 +122,7 @@ class CoCo2017DataLoader:
                 img_root=train_img_root,
                 ann_path=str(train_ann),
                 img_size=self.img_size,
+                class_filter=self.class_filter,                 # 新增：透传类过滤（如 [1] 仅 person）
                 is_train=True,
                 use_color_aug=self.aug["use_color_aug"],
                 use_hflip=self.aug["use_flip"],
@@ -134,6 +135,7 @@ class CoCo2017DataLoader:
                 img_root=val_img_root,
                 ann_path=str(val_ann),
                 img_size=self.img_size,
+                class_filter=self.class_filter,                 # 新增：验证与训练类空间一致
                 is_train=False,
                 use_color_aug=False,
                 use_hflip=False,
@@ -142,12 +144,10 @@ class CoCo2017DataLoader:
                 use_scale=False,
                 scale_range=(1.0, 1.0),
             )
-            # 背景 + N 类
-            # 如果你在 CocoDetDataset 里加了 num_classes 属性，可直接用之
-            try:
-                self.num_classes = 1 + len(train_set.cat_ids)
-            except Exception:
-                self.num_classes = None
+            # 背景 + N 类（优先读数据集自带属性，回退到 cat_ids 推断）
+            self.num_classes = getattr(train_set, "num_classes", None)
+            if self.num_classes is None:
+                self.num_classes = 1 + len(getattr(train_set, "cat_ids", []))
             collate_fn = det_collate_fn
 
         else:  # self.task == "cls"
@@ -180,12 +180,16 @@ class CoCo2017DataLoader:
             raise ValueError(f"Val dataset is empty. Check paths:\n"
                              f"  img_root={val_img_root}\n  ann_path={val_ann}")
 
-        train_loader = DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
-                                  num_workers=self.num_workers, pin_memory=self.pin_memory,
-                                  drop_last=True, collate_fn=collate_fn)
-        val_loader   = DataLoader(val_set, batch_size=min(self.batch_size, 64), shuffle=False,
-                                  num_workers=max(1, self.num_workers // 2), pin_memory=self.pin_memory,
-                                  drop_last=False, collate_fn=collate_fn)
+        train_loader = DataLoader(
+            train_set, batch_size=self.batch_size, shuffle=True,
+            num_workers=self.num_workers, pin_memory=self.pin_memory,
+            drop_last=True, collate_fn=collate_fn
+        )
+        val_loader = DataLoader(
+            val_set, batch_size=min(self.batch_size, 64), shuffle=False,
+            num_workers=max(1, self.num_workers // 2), pin_memory=self.pin_memory,
+            drop_last=False, collate_fn=collate_fn
+        )
 
         print(f"[INFO] Task: {self.task} ({self.cls_mode if self.task=='cls' else ''})")
         print(f"[INFO] Train root: {train_img_root}")

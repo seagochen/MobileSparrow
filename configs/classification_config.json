@@ -1,15 +1,43 @@
 {
   "GPU_ID": "0",
-  "save_dir": "output/",
   "random_seed": 42,
-  "task": "cls",
-  "task_params": { "cls_mode": "single_label" },
+  "cfg_verbose": true,
+
+  "task": "kpts",                         // "kpts" | "det" | "cls"
+  "task_params": {
+    "num_joints": 17,                     // kpts
+    "export_keypoints": true,             // kpts
+    "class_agnostic_nms": false,          // det
+    "class_filter": [],                   // det
+    "cls_mode": "single_label"            // cls
+  },
+
+  "save_dir": "output/",
   "dataset_root_path": "./data/coco2017",
+
   "backbone": "mobilenet_v2",
   "width_mult": 1.0,
-  "img_size": 224,
-  "use_color_aug": true, "use_flip": true,
-  "batch_size": 128, "epochs": 90,
-  "learning_rate": 0.001, "optimizer": "SGD",
-  "scheduler": "MultiStepLR-30,60,80-0.1", "weight_decay": 0.0001
+  "img_size": 256,
+  "target_stride": 4,                     // 仅 kpts 使用
+
+  "use_color_aug": true,
+  "use_flip": true,
+  "use_rotate": true,
+  "rotate_deg": 30.0,
+  "use_scale": true,
+  "scale_range": [0.75, 1.25],
+  "gaussian_radius": 2,                   // 仅 kpts 使用
+  "sigma_scale": 1.0,                     // 仅 kpts 使用
+  "select_person": "largest",             // 仅 kpts 使用
+
+  "pin_memory": true,
+  "num_workers": 8,
+  "batch_size": 64,
+  "epochs": 100,
+  "learning_rate": 0.00035,
+  "optimizer": "Adam",
+  "scheduler": "MultiStepLR-90,130-0.2",
+  "weight_decay": 0.0001,
+  "clip_gradient": 1.0,
+  "log_interval": 10
 }

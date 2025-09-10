@@ -10,7 +10,7 @@
   },
 
   "save_dir": "output/",
-  "dataset_root_path": "./data/coco2017",
+  "dataset_root_path":  "./data/coco2017_movenet_sp",
 
   "backbone": "mobilenet_v2",
   "width_mult": 1.0,

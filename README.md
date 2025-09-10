@@ -52,6 +52,38 @@ python scripts/make_coco2017_for_movenet.py \
   --out-dir ./data/coco2017_movenet_sp
 ```
 
+保留 COCO 原始划分，仅过滤 crowd、小框，且只保留 person 类（类名过滤）并用软链接省空间：
+
+python make_coco2017_for_ssdlite.py \
+  --root ./data/coco2017 \
+  --out-dir ./data/coco2017_det_person \
+  --split-strategy coco \
+  --class-names person \
+  --skip-crowd \
+  --min-box-area 16 \
+  --copy-mode symlink
+
+
+做一个 5 类子集（person, car, bicycle, dog, chair），随机 9:1 重划分 train/test，并拷贝+重编码压缩图片：
+
+python make_coco2017_for_ssdlite.py \
+  --root ./data/coco2017 \
+  --out-dir ./data/coco2017_det_5cls \
+  --splits train,val \
+  --split-strategy random --train-ratio 0.9 --seed 42 \
+  --class-names person,car,bicycle,dog,chair \
+  --skip-crowd --min-box-area 25 \
+  --copy-mode copy --reencode --jpeg-quality 92
+
+
+使用类ID过滤（例如只保留类别 id=1 和 3）：
+
+python make_coco2017_for_ssdlite.py \
+  --root ./data/coco2017 \
+  --out-dir ./data/coco2017_det_cls13 \
+  --class-ids 1,3 --skip-crowd --copy-mode symlink
+
+
 3. You can add your own data to the same format.
 
 4. Before training your own model, prepare the configuration json file first.
@@ -64,9 +96,10 @@ python scripts/make_coco2017_for_movenet.py \
 
   "task": "kpts",                         // "kpts" | "det" | "cls"
   "task_params": {
-    "num_joints": 17,                     // kpts
-    "export_keypoints": true,             // kpts
-    "class_agnostic_nms": false,          // det
+    "num_joints": 17,                     // Only for 'kpts' task
+    "export_keypoints": true,             // Only for 'kpts' task
+    "class_agnostic_nms": false,          // Only for 'det' task
+    "class_filter": [],                   // Only for 'det' task
     "cls_mode": "single_label"            // cls
   },
 
@@ -76,7 +109,7 @@ python scripts/make_coco2017_for_movenet.py \
   "backbone": "mobilenet_v2",
   "width_mult": 1.0,
   "img_size": 256,
-  "target_stride": 4,                     // Only for kpts task
+  "target_stride": 4,                     // Only for 'kpts' task
 
   "use_color_aug": true,
   "use_flip": true,
@@ -84,9 +117,9 @@ python scripts/make_coco2017_for_movenet.py \
   "rotate_deg": 30.0,
   "use_scale": true,
   "scale_range": [0.75, 1.25],
-  "gaussian_radius": 2,                   // Only for kpts task
-  "sigma_scale": 1.0,                     // Only for kpts task
-  "select_person": "largest",             // Only for kpts task
+  "gaussian_radius": 2,                   // Only for 'kpts' task
+  "sigma_scale": 1.0,                     // Only for 'kpts' task
+  "select_person": "largest",             // Only for 'kpts' task
 
   "pin_memory": true,
   "num_workers": 8,
@@ -99,6 +132,7 @@ python scripts/make_coco2017_for_movenet.py \
   "clip_gradient": 1.0,
   "log_interval": 10
 }
+
 ```
 
 5. After choose 

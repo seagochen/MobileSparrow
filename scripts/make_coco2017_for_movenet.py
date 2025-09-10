@@ -1,39 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-COCO single-person square-crop generator (with padding) + optional random re-split into train/test
--------------------------------------------------------------------------------------------------
-满足需求：
-1) 基础参数通过 argparse 读取（--root/--out-dir/--splits/...）
-2) 校验 COCO 根目录结构与 annotations 必备 6 个文件
-3) 仅保留“单人图”（同一张图中非 crowd 的 person 恰好 1 个）
-4) 过滤：跳过 iscrowd!=0；可见关键点(v>0) < min_visible_kpts 的实例跳过
-5) 裁剪：以 bbox ∪ 可见关键点 的最小外接矩形为基础做正方形裁剪；允许 padding（黑边）
-   - 裁剪后 bbox：COCO 像素 [x,y,w,h]（相对裁剪图坐标）
-   - 关键点 keypoints：COCO 标准 [x,y,v]×17（像素，不归一化；v∈{0,1,2}）
-6) 导出：严格 COCO 结构（info/licenses/images/annotations/categories）
-7) 新增：--split-strategy
-   - coco（默认）：按 COCO train2017/val2017 各自导出
-   - random：汇总候选样本后，按 --train-ratio 随机划分出 train/test（可设 --seed）
+COCO single-person square-crop generator (lean, keep official train/val only)
+------------------------------------------------------------------------------
+功能：
+- 仅从 COCO 官方 person_keypoints_{train,val}2017.json 读取
+- 仅保留“单人图”（同一张图中非 crowd 的 person 恰好 1 个）
+- 过滤关键点数量不足的实例（--min-visible-kpts）
+- 以 bbox ∪ 可见关键点 的最小外接矩形为基础做正方形裁剪（允许 padding）
+- 写出与 COCO 兼容的 keypoints 标注（像素坐标，不归一化）
+- 输出目录结构与现有 Loader 直接对接
 
 输出结构：
 <out_dir>/
   images/
     train2017/*.jpg
-    val2017/*.jpg         # 仅在 split-strategy=coco 时存在
-    test2017/*.jpg        # 仅在 split-strategy=random 时存在
+    val2017/*.jpg
   annotations/
     person_keypoints_train2017.json
-    person_keypoints_val2017.json   # coco 模式
-    person_keypoints_test2017.json  # random 模式
+    person_keypoints_val2017.json
 """
 import argparse
 import json
 import math
-import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -43,12 +35,14 @@ import numpy as np
 # 参数
 # ----------------------------
 def parse_args():
-    parser = argparse.ArgumentParser(description="Generate single-person, square crops from COCO keypoints dataset (padding + optional random split).")
+    parser = argparse.ArgumentParser(
+        description="Generate single-person, square crops from COCO keypoints dataset (lean)."
+    )
     parser.add_argument(
         "--root",
         type=Path,
         default=Path("data/coco2017"),
-        help="COCO root dir. Must contain 'annotations', 'train2017', 'val2017'. Default: ./data/coco2017",
+        help="COCO root dir. Must contain 'annotations', 'train2017', 'val2017'.",
     )
     parser.add_argument(
         "--out-dir",
@@ -60,44 +54,25 @@ def parse_args():
         "--splits",
         type=str,
         default="train,val",
-        help="Which COCO splits to read, comma in {train,val}. Default: 'train,val'. In random mode, all selected splits will be merged then re-split.",
-    )
-    parser.add_argument(
-        "--split-strategy",
-        type=str,
-        choices=["coco", "random"],
-        default="coco",
-        help="coco: keep COCO train/val outputs; random: merge and re-split into train/test by ratio.",
-    )
-    parser.add_argument(
-        "--train-ratio",
-        type=float,
-        default=0.9,
-        help="Train ratio when --split-strategy=random. Remainder goes to test. Default: 0.9",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed used in random split. Default: 42",
+        help="Which COCO splits to read, comma in {train,val}.",
     )
     parser.add_argument(
         "--min-visible-kpts",
         type=int,
         default=8,
-        help="Minimum visible (v>0) keypoints per instance. Default: 8",
+        help="Minimum visible (v>0) keypoints per instance.",
     )
     parser.add_argument(
         "--expand-ratio",
         type=float,
         default=1.0,
-        help="Square crop side = max(w,h) of (bbox ∪ visible_kpts) * expand_ratio. Default: 1.0",
+        help="Square crop side = max(w,h) of (bbox ∪ visible_kpts) * expand_ratio.",
     )
     parser.add_argument(
         "--jpeg-quality",
         type=int,
         default=95,
-        help="JPEG quality for saved crops. Default: 95",
+        help="JPEG quality for saved crops.",
     )
     parser.add_argument(
         "--verbose",
@@ -114,22 +89,16 @@ def validate_coco_root(root: Path) -> None:
     ann_dir = root / "annotations"
     train_dir = root / "train2017"
     val_dir = root / "val2017"
-
     for d in (ann_dir, train_dir, val_dir):
         if not d.is_dir():
             raise FileNotFoundError(f"Required directory not found: {d}")
-
     required_ann_files = [
-        ann_dir / "captions_train2017.json",
-        ann_dir / "captions_val2017.json",
-        ann_dir / "instances_train2017.json",
-        ann_dir / "instances_val2017.json",
         ann_dir / "person_keypoints_train2017.json",
         ann_dir / "person_keypoints_val2017.json",
     ]
     missing = [str(p) for p in required_ann_files if not p.is_file()]
     if missing:
-        raise FileNotFoundError("Missing annotation files:\n  " + "\n  ".join(missing))
+        raise FileNotFoundError("Missing keypoints annotation files:\n  " + "\n  ".join(missing))
 
 
 def load_json(path: Path) -> Dict:
@@ -140,12 +109,12 @@ def load_json(path: Path) -> Dict:
 def index_by_image(annotations: List[Dict]) -> Dict[int, List[Dict]]:
     by_img: Dict[int, List[Dict]] = {}
     for ann in annotations:
-        by_img.setdefault(ann["image_id"], []).append(ann)
+        by_img.setdefault(int(ann["image_id"]), []).append(ann)
     return by_img
 
 
 # ----------------------------
-# 关键点/几何工具
+# 关键点/几何工具（与原脚本一致）
 # ----------------------------
 def visible_kpt_count(kpts: List[float]) -> int:
     # keypoints = [x1,y1,v1,x2,y2,v2,...] (len=51)
@@ -153,9 +122,6 @@ def visible_kpt_count(kpts: List[float]) -> int:
 
 
 def union_bbox_with_visible_kpts(bbox_xywh: List[float], kpts_xyv: List[float]) -> Tuple[float, float, float, float]:
-    """
-    取 bbox 与可见关键点的最小外接矩形（浮点），返回 [x_min, y_min, w, h]
-    """
     x, y, w, h = bbox_xywh
     x0, y0, x1, y1 = x, y, x + w, y + h
     for i in range(0, len(kpts_xyv), 3):
@@ -167,10 +133,6 @@ def union_bbox_with_visible_kpts(bbox_xywh: List[float], kpts_xyv: List[float]) 
 
 
 def square_crop_from_box(box_xywh: Tuple[float, float, float, float], expand_ratio: float) -> Tuple[int, int, int]:
-    """
-    基于给定 box 的中心，生成正方形裁剪：side = ceil(max(w,h) * expand_ratio)
-    返回整数 (x0, y0, side)，允许后续 padding。
-    """
     bx, by, bw, bh = box_xywh
     cx, cy = bx + bw / 2.0, by + bh / 2.0
     side = int(math.ceil(max(bw, bh) * float(expand_ratio)))
@@ -181,9 +143,6 @@ def square_crop_from_box(box_xywh: Tuple[float, float, float, float], expand_rat
 
 
 def crop_with_padding(image: np.ndarray, x0: int, y0: int, side: int) -> np.ndarray:
-    """
-    允许 padding 的正方形裁剪。超出图像部分用 0 填充（黑边）。
-    """
     h, w = image.shape[:2]
     x1, y1 = x0 + side, y0 + side
     src_x0, src_y0 = max(0, x0), max(0, y0)
@@ -197,9 +156,6 @@ def crop_with_padding(image: np.ndarray, x0: int, y0: int, side: int) -> np.ndar
 
 
 def adjust_bbox_to_crop(bbox_xywh: List[float], crop_x0: int, crop_y0: int, side: int) -> List[float]:
-    """
-    将原图 bbox (像素) 映射到裁剪图坐标（像素）。
-    """
     x, y, w, h = bbox_xywh
     nx, ny = float(x - crop_x0), float(y - crop_y0)
     nx = max(0.0, min(nx, float(side)))
@@ -208,9 +164,6 @@ def adjust_bbox_to_crop(bbox_xywh: List[float], crop_x0: int, crop_y0: int, side
 
 
 def adjust_kpts_to_crop(kpts_xyv: List[float], crop_x0: int, crop_y0: int, side: int) -> List[float]:
-    """
-    将 keypoints 从原图像素坐标映射到裁剪图像素坐标（保持像素单位）。
-    """
     out: List[float] = []
     for i in range(0, len(kpts_xyv), 3):
         x, y, v = float(kpts_xyv[i]), float(kpts_xyv[i + 1]), float(kpts_xyv[i + 2])
@@ -228,11 +181,11 @@ def adjust_kpts_to_crop(kpts_xyv: List[float], crop_x0: int, crop_y0: int, side:
 # ----------------------------
 @dataclass
 class ImgRec:
-    split: str            # 来源 split: 'train' or 'val'
+    split: str            # 'train' or 'val'
     file_name: str
     width: int
     height: int
-    ann: Dict             # 该图唯一的 person 标注（已保证单人图）
+    ann: Dict             # 唯一 person 标注
     crop_x0: int
     crop_y0: int
     crop_side: int
@@ -253,7 +206,7 @@ def collect_single_person_candidates(root: Path, split: str, min_visible_kpts: i
     licenses = coco.get("licenses", [])
     anns_by_img = index_by_image(annotations)
 
-    # 找 person 类 id
+    # person 类 id
     person_cat_id = None
     for c in categories:
         if c.get("name") == "person":
@@ -266,12 +219,12 @@ def collect_single_person_candidates(root: Path, split: str, min_visible_kpts: i
     skipped_kpt = 0
 
     for img in images:
-        img_id = img["id"]
+        img_id = int(img["id"])
         file_name = img["file_name"]
         width = int(img["width"]); height = int(img["height"])
 
         all_anns = anns_by_img.get(img_id, [])
-        person_anns = [a for a in all_anns if a.get("category_id") == person_cat_id and int(a.get("iscrowd", 0)) == 0]
+        person_anns = [a for a in all_anns if int(a.get("category_id")) == int(person_cat_id) and int(a.get("iscrowd", 0)) == 0]
         if len(person_anns) != 1:
             skipped_multi += 1
             continue
@@ -327,7 +280,7 @@ def save_crop_and_ann(rec: ImgRec, src_img_dir: Path, out_img_dir: Path,
 
     crop_img = crop_with_padding(img, rec.crop_x0, rec.crop_y0, rec.crop_side)
 
-    # 映射 bbox & kpts
+    # 映射 bbox & kpts（像素坐标）
     bbox = adjust_bbox_to_crop(rec.ann["bbox"], rec.crop_x0, rec.crop_y0, rec.crop_side)
     kpts = adjust_kpts_to_crop(rec.ann["keypoints"], rec.crop_x0, rec.crop_y0, rec.crop_side)
     num_kpts = visible_kpt_count(rec.ann["keypoints"])
@@ -364,25 +317,22 @@ def save_crop_and_ann(rec: ImgRec, src_img_dir: Path, out_img_dir: Path,
 
 
 # ----------------------------
-# 主逻辑
+# 主逻辑：保持官方 train/val
 # ----------------------------
 def main():
     args = parse_args()
     validate_coco_root(args.root)
 
     out_dir = args.out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "images").mkdir(parents=True, exist_ok=True)
+    (out_dir / "annotations").mkdir(parents=True, exist_ok=True)
 
     src_splits = [s.strip() for s in args.splits.split(",") if s.strip() in {"train", "val"}]
     if not src_splits:
         raise ValueError("No valid splits specified. Use --splits train,val or a subset.")
 
-    # 收集候选（按源 split）
-    collected = []
-    ref_info = None
-    ref_licenses = None
-    ref_categories = None
-    src_img_dirs = {}
+    # 逐个 split 导出
+    ref_info = None; ref_licenses = None; ref_categories = None
     for sp in src_splits:
         bundle = collect_single_person_candidates(
             root=args.root, split=sp,
@@ -394,73 +344,19 @@ def main():
             ref_info = bundle["coco_info"]["info"]
             ref_licenses = bundle["coco_info"]["licenses"]
             ref_categories = bundle["coco_info"]["categories"]
-        collected.extend(bundle["records"])
-        src_img_dirs[sp] = bundle["img_dir"]
 
-    if args.split_strategy == "coco":
-        # 分别写 train/val（各自只处理来自对应源 split 的候选）
-        for sp in src_splits:
-            recs = [r for r in collected if r.split == sp]
-            images, anns = [], []
-            next_image_id, next_ann_id = 1, 1
-
-            out_img_dir = out_dir / "images" / f"{sp}2017"
-            out_ann_path = out_dir / "annotations" / f"person_keypoints_{sp}2017.json"
-
-            for r in recs:
-                result = save_crop_and_ann(
-                    rec=r,
-                    src_img_dir=src_img_dirs[r.split],
-                    out_img_dir=out_img_dir,
-                    next_image_id=next_image_id,
-                    next_ann_id=next_ann_id,
-                    jpeg_quality=args.jpeg_quality,
-                )
-                if result is None:
-                    continue
-                img_item, ann_item = result
-                images.append(img_item); anns.append(ann_item)
-                next_image_id += 1; next_ann_id += 1
-
-                if args.verbose and (next_image_id - 1) % 500 == 0:
-                    print(f"[{sp}] saved {next_image_id-1} items")
-
-            write_coco_json(
-                path=out_ann_path,
-                info=ref_info,
-                licenses=ref_licenses,
-                categories=ref_categories,
-                images=images,
-                annotations=anns,
-                desc_suffix=f"COCO 2017 {sp} single-person square crops (with padding), pixel coords",
-            )
-            print(f"[{sp}] Done. images={len(images)} anns={len(anns)} -> {out_ann_path}")
-
-    else:
-        # 随机重划分 train/test
-        random.seed(args.seed)
-        all_recs = collected.copy()
-        random.shuffle(all_recs)
-
-        n_total = len(all_recs)
-        n_train = int(round(n_total * args.train_ratio))
-        n_test = n_total - n_train
-        train_recs = all_recs[:n_train]
-        test_recs = all_recs[n_train:]
-
-        print(f"[random split] total={n_total} -> train={len(train_recs)} test={len(test_recs)} "
-              f"(train_ratio={args.train_ratio}, seed={args.seed})")
-
-        # 写 train2017
-        images_tr, anns_tr = [], []
+        recs = bundle["records"]
+        images, anns = [], []
         next_image_id, next_ann_id = 1, 1
-        out_img_dir_tr = out_dir / "images" / "train2017"
-        out_ann_path_tr = out_dir / "annotations" / "person_keypoints_train2017.json"
-        for r in train_recs:
+
+        out_img_dir = out_dir / "images" / f"{sp}2017"
+        out_ann_path = out_dir / "annotations" / f"person_keypoints_{sp}2017.json"
+
+        for r in recs:
             result = save_crop_and_ann(
                 rec=r,
-                src_img_dir=src_img_dirs[r.split],
-                out_img_dir=out_img_dir_tr,
+                src_img_dir=bundle["img_dir"],
+                out_img_dir=out_img_dir,
                 next_image_id=next_image_id,
                 next_ann_id=next_ann_id,
                 jpeg_quality=args.jpeg_quality,
@@ -468,54 +364,22 @@ def main():
             if result is None:
                 continue
             img_item, ann_item = result
-            images_tr.append(img_item); anns_tr.append(ann_item)
+            images.append(img_item); anns.append(ann_item)
             next_image_id += 1; next_ann_id += 1
+
             if args.verbose and (next_image_id - 1) % 500 == 0:
-                print(f"[train] saved {next_image_id-1} items")
+                print(f"[{sp}] saved {next_image_id-1} items")
 
         write_coco_json(
-            path=out_ann_path_tr,
+            path=out_ann_path,
             info=ref_info,
             licenses=ref_licenses,
             categories=ref_categories,
-            images=images_tr,
-            annotations=anns_tr,
-            desc_suffix="COCO 2017 train (random re-split) single-person square crops (with padding), pixel coords",
+            images=images,
+            annotations=anns,
+            desc_suffix=f"COCO 2017 {sp} single-person square crops (with padding), pixel coords",
         )
-        print(f"[train] Done. images={len(images_tr)} anns={len(anns_tr)} -> {out_ann_path_tr}")
-
-        # 写 test2017
-        images_te, anns_te = [], []
-        next_image_id, next_ann_id = 1, 1
-        out_img_dir_te = out_dir / "images" / "test2017"
-        out_ann_path_te = out_dir / "annotations" / "person_keypoints_test2017.json"
-        for r in test_recs:
-            result = save_crop_and_ann(
-                rec=r,
-                src_img_dir=src_img_dirs[r.split],
-                out_img_dir=out_img_dir_te,
-                next_image_id=next_image_id,
-                next_ann_id=next_ann_id,
-                jpeg_quality=args.jpeg_quality,
-            )
-            if result is None:
-                continue
-            img_item, ann_item = result
-            images_te.append(img_item); anns_te.append(ann_item)
-            next_image_id += 1; next_ann_id += 1
-            if args.verbose and (next_image_id - 1) % 500 == 0:
-                print(f"[test] saved {next_image_id-1} items")
-
-        write_coco_json(
-            path=out_ann_path_te,
-            info=ref_info,
-            licenses=ref_licenses,
-            categories=ref_categories,
-            images=images_te,
-            annotations=anns_te,
-            desc_suffix="COCO 2017 test (random re-split) single-person square crops (with padding), pixel coords",
-        )
-        print(f"[test] Done. images={len(images_te)} anns={len(anns_te)} -> {out_ann_path_te}")
+        print(f"[{sp}] Done. images={len(images)} anns={len(anns)} -> {out_ann_path}")
 
 
 if __name__ == "__main__":

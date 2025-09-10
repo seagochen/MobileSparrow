@@ -1,17 +1,36 @@
 {
   "GPU_ID": "0",
   "random_seed": 42,
-  "save_dir": "output/",
+  "cfg_verbose": true,
+
   "task": "det",
-  "task_params": {"class_agnostic_nms": false },
-  "dataset_root_path": "./data/coco2017",
+  "task_params": {
+    "class_filter": [],
+    "class_agnostic_nms": false
+  },
+
+  "save_dir": "output/",
+  "dataset_root_path": "./data/coco2017_det_5cls",
+
   "backbone": "mobilenet_v2",
   "width_mult": 1.0,
   "img_size": 256,
-  "use_color_aug": true, "use_flip": true,
-  "use_rotate": true, "rotate_deg": 15.0,
-  "use_scale": true, "scale_range": [0.8, 1.2],
-  "batch_size": 64, "epochs": 120,
-  "learning_rate": 0.001, "optimizer": "Adam",
-  "scheduler": "MultiStepLR-70,100-0.1", "weight_decay": 0.0005
+
+  "use_color_aug": true,
+  "use_flip": true,
+  "use_rotate": true,
+  "rotate_deg": 30.0,
+  "use_scale": true,
+  "scale_range": [0.75, 1.25],
+
+  "pin_memory": true,
+  "num_workers": 8,
+  "batch_size": 64,
+  "epochs": 10,
+  "learning_rate": 0.00035,
+  "optimizer": "Adam",
+  "scheduler": "MultiStepLR-90,130-0.2",
+  "weight_decay": 0.0001,
+  "clip_gradient": 1.0,
+  "log_interval": 10
 }
