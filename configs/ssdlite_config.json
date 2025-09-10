@@ -1,0 +1,27 @@
+{
+    "GPU_ID": "0",
+    "num_workers": 8, 
+    "random_seed": 42,
+    "cfg_verbose": true,
+
+    "save_dir": "output/ssdlite",
+
+    "backbone": "mobilenet_v2",
+
+    "img_size": 192,
+
+    "img_path": "./data/coco2017",
+    "train_label_path": "./data/coco2017/annotations/instances_train2017.json",
+    "val_label_path":   "./data/coco2017/annotations/instances_val2017.json",
+    
+    "log_interval": 10,
+    "save_best_only": true,
+    "pin_memory": true,
+
+    "learning_rate": 1e-3,
+    "batch_size": 64, 
+    "epochs": 100,
+    "optimizer": "Adam",
+    "scheduler": "MultiStepLR-70,100-0.1",
+    "weight_decay": 5e-4
+}

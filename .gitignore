@@ -17,7 +17,7 @@ output*/
 config_*.json
 
 # Ignore the downloaded dataset
-data/coco2017/
+data/coco2017*/
 
 # Ignore other files
 data/cropped/

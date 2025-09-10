@@ -24,11 +24,11 @@ import torch
 from torch.utils.data import DataLoader
 
 import core
-from core.dataloader.simple_loader import SimpleImageFolder
-from core.task.task import Task
+from core.datasets.simple_loader import SimpleImageFolder
+from core.datasets.coco_kpts import CoCo2017DataLoader
+from core.task.task_kpts import KptsTask
 from core.models.movenet import MoveNet
-from core.models.dummy_movenet import DummyMoveNet
-from core.dataloader.dataloader import CoCo2017DataLoader
+from core.models.onnx.dummy_movenet import DummyMoveNet
 
 
 # ----------------------------------------------------------------------
@@ -90,7 +90,7 @@ def cmd_train(cfg: Dict[str, Any]):
     train_loader, val_loader = data.getTrainValDataloader()
 
     # 创建任务
-    task = Task(cfg, model)
+    task = KptsTask(cfg, model)
 
     # 如果有先前训练的结果，尝试加载
     try:
@@ -115,7 +115,7 @@ def cmd_eval(cfg: Dict[str, Any], weights: str):
     data = build_data(cfg)
     _, val_loader = data.getTrainValDataloader()
 
-    task = Task(cfg, model)
+    task = KptsTask(cfg, model)
     if not weights:
         weights = str(Path(cfg["save_dir"]) / "best.pt")
     task.modelLoad(weights)
@@ -130,7 +130,7 @@ def cmd_predict(cfg, images_dir, out_dir, weights=None):
 
     # 1) 构建模型 & Task
     model = build_model(cfg)
-    task = Task(cfg, model)
+    task = KptsTask(cfg, model)
 
     # 2) 选择权重：--weights > best.pt > last.pt
     if not weights:
@@ -168,7 +168,7 @@ def cmd_export_onnx(cfg: Dict[str, Any], weights: str, out_path: str,
     ensure_dir(Path(out_path).parent)
 
     model = build_model(cfg)
-    task = Task(cfg, model)
+    task = KptsTask(cfg, model)
 
     # 自动挑选权重：best.pt 优先，否则 last.pt
     if not weights:

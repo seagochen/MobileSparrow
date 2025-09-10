@@ -13,39 +13,43 @@ Google just release pre-train models(tfjs or tflite), which cannot be converted 
 
 ## How To Run
 
-1.Download COCO dataset2017 from https://cocodataset.org/. (You need train2017.zip, val2017.zip and annotations.)Unzip to `movenet.pytorch/data/` like this:
+1.Download COCO dataset2017 from https://cocodataset.org/. Or Use the following script to automatically download the dataset into the right place.
 
-```
-├── data
-    ├── annotations (person_keypoints_train2017.json, person_keypoints_val2017.json, ...)
-    ├── train2017   (xx.jpg, xx.jpg,...)
-    └── val2017     (xx.jpg, xx.jpg,...)
-
+```bash
+./scripts/get_coco2017.sh
 ```
 
+After the download is finished, cd to `data` directory and verify the data structure whether it is correct.
 
-2.Make data to our data format.
+```bash
+$ tree -L 2
+.
+├── coco2017
+│   ├── annotations
+│   ├── train2017
+│   └── val2017
+└── imgs
+    ├── bad.png
+    ├── good.png
+    └── three_pane_aligned.gif
 ```
-python scripts/make_coco_data_17keypooints.py
-```
-```
-Our data format: JSON file
-Keypoints order:['nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear', 
-    'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow', 'left_wrist', 
-    'right_wrist', 'left_hip', 'right_hip', 'left_knee', 'right_knee', 'left_ankle', 
-    'right_ankle']
 
-One item:
-[{"img_name": "0.jpg",
-  "keypoints": [x0,y0,z0,x1,y1,z1,...],
-  #z: 0 for no label, 1 for labeled but invisible, 2 for labeled and visible
-  "center": [x,y],
-  "bbox":[x0,y0,x1,y1],
-  "other_centers": [[x0,y0],[x1,y1],...],
-  "other_keypoints": [[[x0,y0],[x1,y1],...],[[x0,y0],[x1,y1],...],...], #lenth = num_keypoints
- },
- ...
-]
+2. Use the following script to prepare the data:
+
+```bash
+# 1) By default, the original COCO split is used (train/val are exported separately)
+python python scripts/make_coco2017_for_movenet.py
+
+# 2) After merging the COCO (that you specify), randomly re-split into train/test according to the ratio
+python python scripts/make_coco2017_for_movenet.py \
+  --split-strategy random \
+  --splits train,val \
+  --train-ratio 0.9 \
+  --seed 42 \
+  --expand-ratio 1.25 \
+  --min-visible-kpts 8 \
+  --root ./data/coco2017 \
+  --out-dir ./data/coco2017_movenet_sp
 ```
 
 3.You can add your own data to the same format.

@@ -1,0 +1,36 @@
+{
+  "GPU_ID": "0",
+  "num_workers": 8,
+  "random_seed": 42,
+  "cfg_verbose": true,
+
+  "save_dir": "output/",
+
+  "num_classes": 17,
+  "width_mult": 1.0,
+  "backbone": "mobilenet_v2",
+
+  "img_size": 192,
+  "target_stride": 4,
+  "hm_th": 0.12,  
+  "export_keypoints": true,
+
+  "img_path": "./data/coco2017_movenet_sp",
+  "train_label_path": "./data/coco2017_movenet_sp/annotations/person_keypoints_train2017.json",
+  "val_label_path":   "./data/coco2017_movenet_sp/annotations/person_keypoints_val2017.json",
+  "balance_data": true,
+
+  "log_interval": 10,
+  "save_best_only": true,
+  "pin_memory": true,
+
+  "learning_rate": 0.00035,
+  "batch_size": 48,  
+  "epochs": 100, 
+  "optimizer": "Adam",
+  "scheduler": "MultiStepLR-90,130-0.2",
+  "weight_decay": 0.0001,
+
+  "class_weight": null,
+  "clip_gradient": 1.0
+}

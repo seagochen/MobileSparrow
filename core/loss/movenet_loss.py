@@ -215,8 +215,8 @@ class MovenetLoss(torch.nn.Module):
         return [heatmap_loss, bone_loss, center_loss, regs_loss, offset_loss]
 
 
-# 兼容你原来的全局实例 & 入口
-movenetLoss = MovenetLoss(use_target_weight=False)
+# # 兼容你原来的全局实例 & 入口
+# movenetLoss = MovenetLoss(use_target_weight=False)
 
-def calculate_loss(predict, label, kps_mask=None):
-    return movenetLoss(predict, label, kps_mask)
+# def calculate_loss(predict, label, kps_mask=None):
+#     return movenetLoss(predict, label, kps_mask)

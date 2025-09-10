@@ -264,7 +264,7 @@ def movenetDecode(data,
 # =========================
 # The Task class
 # =========================
-class Task():
+class KptsTask():
     def __init__(self, cfg, model):
         self.cfg = cfg
         use_cuda = (self.cfg.get('GPU_ID', '') != '' and torch.cuda.is_available())
