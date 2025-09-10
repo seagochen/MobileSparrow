@@ -7,8 +7,6 @@ Lightweight human pose & object detection toolkit (MoveNet + SSDLite) for mobile
 
 Originally a MoveNet (17 keypoints) re-implementation, now extended to **MobileNet/ShuffleNet + FPN-Lite + SSDLite** for multi-object detection — all under a unified config/loader pipeline.
 
-![start](/data/imgs/three_pane_aligned.gif)
-
 ---
 
 ## ✨ What’s New
