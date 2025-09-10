@@ -3,10 +3,12 @@
   "random_seed": 42,
   "cfg_verbose": true,
 
-  "task": "kpts", 
+  "task": "kpts",                         // "kpts" | "det" | "cls"
   "task_params": {
-    "num_joints": 17,
-    "export_keypoints": true
+    "num_joints": 17,                     // kpts
+    "export_keypoints": true,             // kpts
+    "class_agnostic_nms": false,          // det
+    "cls_mode": "single_label"            // cls
   },
 
   "save_dir": "output/",
@@ -15,7 +17,7 @@
   "backbone": "mobilenet_v2",
   "width_mult": 1.0,
   "img_size": 256,
-  "target_stride": 4,
+  "target_stride": 4,                     // 仅 kpts 使用
 
   "use_color_aug": true,
   "use_flip": true,
@@ -23,9 +25,9 @@
   "rotate_deg": 30.0,
   "use_scale": true,
   "scale_range": [0.75, 1.25],
-  "gaussian_radius": 2,
-  "sigma_scale": 1.0, 
-  "select_person": "largest",
+  "gaussian_radius": 2,                   // 仅 kpts 使用
+  "sigma_scale": 1.0,                     // 仅 kpts 使用
+  "select_person": "largest",             // 仅 kpts 使用
 
   "pin_memory": true,
   "num_workers": 8,

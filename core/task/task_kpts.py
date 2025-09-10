@@ -286,6 +286,13 @@ class KptsTask():
 
         self.best_score = float("-inf")         # 记录验证集最佳指标（越大越好）
         self.save_dir = self.cfg["save_dir"]    # 统一保存目录
+
+        self.num_joints = int(
+            self.cfg.get(
+                "num_classes",
+                self.cfg.get("task_params", {}).get("num_joints", 17)
+            )
+        )
         os.makedirs(self.save_dir, exist_ok=True)
 
     def _align_output_for_loss_and_decode(self, output) -> Tuple[List[torch.Tensor], Dict[str, torch.Tensor]]:
@@ -316,7 +323,7 @@ class KptsTask():
 
     def onTrainStep(self, train_loader, epoch):
         self.model.train()
-        right_count = np.zeros(self.cfg['num_classes'], dtype=np.int64)
+        right_count = np.zeros(self.num_joints, dtype=np.int64)
         total_count = 0
 
         for batch_idx, (imgs, labels, kps_mask, img_names) in enumerate(train_loader):
@@ -360,7 +367,7 @@ class KptsTask():
 
     def onValidation(self, val_loader, epoch):
         self.model.eval()
-        right_count = np.zeros(self.cfg['num_classes'], dtype=np.int64)
+        right_count = np.zeros(self.num_joints, dtype=np.int64)
         total_count = 0
 
         sum_hm = sum_b = sum_c = sum_r = sum_o = sum_total = 0.0
@@ -503,7 +510,7 @@ class KptsTask():
     # -------------------------
     def evaluate(self, data_loader):
         self.model.eval()
-        right_count = np.zeros(self.cfg['num_classes'], dtype=np.int64)
+        right_count = np.zeros(self.num_joints, dtype=np.int64)
         total_count = 0
         with torch.no_grad():
             for batch_idx, (imgs, labels, kps_mask, img_names) in enumerate(data_loader):

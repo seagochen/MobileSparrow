@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 
 import core
 from core.datasets.simple_loader import SimpleImageFolder
-from core.datasets.coco_loader import CoCo2017KptsDataLoader
+from core.datasets.coco_loader import CoCo2017DataLoader
 from core.task.task_kpts import KptsTask
 from core.models.movenet import MoveNet
 from core.models.onnx.dummy_movenet import DummyMoveNet
@@ -63,10 +63,9 @@ def ensure_dir(p: str):
 # 组装模型与数据
 # ----------------------------------------------------------------------
 def build_model(cfg: Dict[str, Any]) -> torch.nn.Module:
-
-    # 构造MoveNet模型
+    num_joints = cfg.get("num_classes", cfg.get("task_params", {}).get("num_joints", 17))
     model = MoveNet(
-        num_joints=cfg["num_classes"],
+        num_joints=num_joints,
         width_mult=cfg.get("width_mult", 1.0),
         neck_outc=cfg.get("neck_outc", 64),
         head_midc=cfg.get("head_midc", 32),
@@ -75,7 +74,8 @@ def build_model(cfg: Dict[str, Any]) -> torch.nn.Module:
     return model
 
 def build_data(cfg: Dict[str, Any]):
-    return CoCo2017KptsDataLoader(cfg)
+    # 强制使用关键点任务
+    return CoCo2017DataLoader(cfg, task="kpts")
 
 # ----------------------------------------------------------------------
 # 子命令：train
@@ -86,7 +86,7 @@ def cmd_train(cfg: Dict[str, Any]):
     ensure_dir(cfg["save_dir"])
 
     model: torch.nn.Module = build_model(cfg)
-    data: CoCo2017KptsDataLoader = build_data(cfg)
+    data = build_data(cfg)
     train_loader, val_loader = data.getTrainValDataloader()
 
     # 创建任务
@@ -194,7 +194,8 @@ def cmd_export_onnx(cfg: Dict[str, Any], weights: str, out_path: str,
     # except Exception:
     #     raise RuntimeError("缺少 onnx，请先安装：pip install onnx")
 
-    use_keypoints = bool(cfg.get("export_keypoints", False))
+    use_keypoints = bool(cfg.get("export_keypoints",
+                     cfg.get("task_params", {}).get("export_keypoints", False)))
     print(f"[INFO] Exporting to ONNX: {out_path} (opset={opset}, dynamic={dynamic}, keypoints={use_keypoints})")
 
     if use_keypoints:
@@ -204,8 +205,7 @@ def cmd_export_onnx(cfg: Dict[str, Any], weights: str, out_path: str,
             movenet=task.model,
             num_joints=int(cfg.get("num_classes", 17)),
             img_size=int(cfg.get("img_size", 192)),
-            target_stride=int(cfg.get("target_stride", 4)),
-            hm_th=float(cfg.get("hm_th", 0.1)),
+            target_stride=int(cfg.get("target_stride", 4))
         ).to(device).eval()
 
         out_names = ["keypoints"]

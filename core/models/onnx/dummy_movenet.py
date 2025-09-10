@@ -8,12 +8,13 @@ class DummyMoveNet(nn.Module):
     Wrap MoveNet(dict outputs) -> [B, 51]   (17 joints × (x,y,score))
     All ops are ONNX-friendly (no numpy).
     """
-    def __init__(self, movenet: nn.Module, num_joints: int = 17,
-                 img_size: int = 192, target_stride: int = 4, hm_th: float = 0.1):
+    def __init__(self, movenet: nn.Module,
+                num_joints: int = 17,
+                img_size: int = 192, 
+                target_stride: int = 4):
         super().__init__()
         self.m = movenet
         self.num_joints = num_joints
-        self.hm_th = hm_th
         self.Ht = img_size // target_stride
         self.Wt = img_size // target_stride
 
@@ -86,12 +87,8 @@ class DummyMoveNet(nn.Module):
             x_norm = (jx.float() + off_x) / float(W)                     # [B,1]
             y_norm = (jy.float() + off_y) / float(H)                     # [B,1]
 
-            # 2.4 低于阈值的点打成 -1（保持与现有评估一致）
-            mask = (score >= self.hm_th).float()
-            x_out = x_norm * mask + (-1.0) * (1.0 - mask)
-            y_out = y_norm * mask + (-1.0) * (1.0 - mask)
-
-            out_list.extend([x_out, y_out, score])
+            # 将数据打包成 x, y, score 的格式
+            out_list.extend([x_norm, y_norm, score])
 
         # 拼成 [B, 51]
         out = torch.cat(out_list, dim=1)

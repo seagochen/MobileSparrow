@@ -1,30 +1,45 @@
 from pathlib import Path
 from typing import Any, Dict, Tuple
-import cv2
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 from core.datasets.coco_kpts import CocoKeypointsDataset
+from core.datasets.coco_det import CocoDetDataset
+from core.datasets.coco_cls import CocoClsDataset
+
+# ---------- det 专用 collate（可变数目标） ----------
+def det_collate_fn(batch):
+    imgs, targets = zip(*batch)
+    imgs = torch.stack(imgs, 0)
+    return imgs, list(targets)
 
 # -----------------------
-# 对外封装（兼容旧接口）
+# 统一对外封装
 # -----------------------
-class CoCo2017KptsDataLoader:
-    def __init__(self, cfg: Dict[str, Any]):
+class CoCo2017DataLoader:
+    def __init__(self, cfg: Dict[str, Any], 
+                 task: str = "kpts",
+                 cls_mode: str = "single_label"):
+        """
+        task: 'kpts' | 'det' | 'cls'
+        cls_mode: 'single_label' | 'multi_label'（仅 task='cls' 有效）
+        """
+        assert task in ("kpts", "det", "cls")
+        assert cls_mode in ("single_label", "multi_label")
         self.cfg = cfg
+        self.task = task
+        self.cls_mode = cls_mode
+
         self.img_size = int(cfg.get("img_size", 192))
         self.target_stride = int(cfg.get("target_stride", 4))
         self.batch_size = int(cfg.get("batch_size", 64))
         self.num_workers = int(cfg.get("num_workers", 8))
         self.pin_memory = bool(cfg.get("pin_memory", True))
 
-        # 原始配置路径（通常是 ./data/coco2017）
+        # 根路径（通常是 ./data/coco2017）
         self.root = Path(cfg["dataset_root_path"])
-        self.train_label_path = self.root / "annotations" / "person_keypoints_train2017.json"
-        self.test_label_path = self.root / "annotations" / "person_keypoints_test2017.json"
 
-        # aug 配置（也可从 cfg 读取）
+        # 增广配置（与 kpts 对齐）
         self.aug = dict(
             gaussian_radius=cfg.get("gaussian_radius", 2),
             sigma_scale=cfg.get("sigma_scale", 1.0),
@@ -36,6 +51,9 @@ class CoCo2017KptsDataLoader:
             scale_range=tuple(cfg.get("scale_range", (0.75, 1.25))),
             select_person=cfg.get("select_person", "largest"),
         )
+
+        # 运行后填充，供外部读取（det/cls 会写入具体类别数；kpts 为 None）
+        self.num_classes: int | None = None
 
     def _resolve_roots(self) -> Tuple[str, str]:
         """
@@ -52,85 +70,127 @@ class CoCo2017KptsDataLoader:
             if tr.is_dir() and va.is_dir():
                 return str(tr), str(va)
             if tr.is_dir() and te.is_dir():
+                # 有的目录把验证集放 test2017，我们也做兼容
                 return str(tr), str(te)
-        # 回退：都没有明确子目录时，把根当成图像根
         return str(self.root), str(self.root)
 
+    def _ann_paths(self) -> Tuple[Path, Path]:
+        ann_dir = self.root / "annotations"
+        if self.task == "kpts":
+            # 注意：验证应使用 *val2017.json*，test 没有公开标注
+            train = ann_dir / "person_keypoints_train2017.json"
+            val   = ann_dir / "person_keypoints_val2017.json"
+        else:
+            train = ann_dir / "instances_train2017.json"
+            val   = ann_dir / "instances_val2017.json"
+        return train, val
 
     def getTrainValDataloader(self) -> Tuple[DataLoader, DataLoader]:
         train_img_root, val_img_root = self._resolve_roots()
+        train_ann, val_ann = self._ann_paths()
 
-        train_set = CocoKeypointsDataset(
-            img_root=train_img_root,
-            ann_path=self.train_label_path,
-            img_size=self.img_size,
-            target_stride=self.target_stride,
-            is_train=True,
-            **self.aug,
-        )
-        val_set = CocoKeypointsDataset(
-            img_root=val_img_root,
-            ann_path=self.test_label_path,
-            img_size=self.img_size,
-            target_stride=self.target_stride,
-            is_train=False,
-            # 验证默认关闭强增广，仅保留必要参数
-            gaussian_radius=self.aug["gaussian_radius"],
-            sigma_scale=self.aug["sigma_scale"],
-            use_color_aug=False,
-            use_flip=False,
-            use_rotate=False,
-            rotate_deg=0.0,
-            use_scale=False,
-            scale_range=(1.0, 1.0),
-            select_person=self.aug["select_person"],
-        )
+        if self.task == "kpts":
+            train_set = CocoKeypointsDataset(
+                img_root=train_img_root,
+                ann_path=train_ann,
+                img_size=self.img_size,
+                target_stride=self.target_stride,
+                is_train=True,
+                **self.aug,
+            )
+            val_set = CocoKeypointsDataset(
+                img_root=val_img_root,
+                ann_path=val_ann,
+                img_size=self.img_size,
+                target_stride=self.target_stride,
+                is_train=False,
+                gaussian_radius=self.aug["gaussian_radius"],
+                sigma_scale=self.aug["sigma_scale"],
+                use_color_aug=False,
+                use_flip=False,
+                use_rotate=False,
+                rotate_deg=0.0,
+                use_scale=False,
+                scale_range=(1.0, 1.0),
+                select_person=self.aug["select_person"],
+            )
+            self.num_classes = None
+            collate_fn = None
+
+        elif self.task == "det":
+            train_set = CocoDetDataset(
+                img_root=train_img_root,
+                ann_path=str(train_ann),
+                img_size=self.img_size,
+                is_train=True,
+                use_color_aug=self.aug["use_color_aug"],
+                use_hflip=self.aug["use_flip"],
+                use_rotate=self.aug["use_rotate"],
+                rotate_deg=self.aug["rotate_deg"],
+                use_scale=self.aug["use_scale"],
+                scale_range=self.aug["scale_range"],
+            )
+            val_set = CocoDetDataset(
+                img_root=val_img_root,
+                ann_path=str(val_ann),
+                img_size=self.img_size,
+                is_train=False,
+                use_color_aug=False,
+                use_hflip=False,
+                use_rotate=False,
+                rotate_deg=0.0,
+                use_scale=False,
+                scale_range=(1.0, 1.0),
+            )
+            # 背景 + N 类
+            # 如果你在 CocoDetDataset 里加了 num_classes 属性，可直接用之
+            try:
+                self.num_classes = 1 + len(train_set.cat_ids)
+            except Exception:
+                self.num_classes = None
+            collate_fn = det_collate_fn
+
+        else:  # self.task == "cls"
+            train_set = CocoClsDataset(
+                img_root=train_img_root,
+                ann_path=str(train_ann),
+                img_size=self.img_size,
+                mode=self.cls_mode,
+                is_train=True,
+                use_color_aug=self.aug["use_color_aug"],
+                use_hflip=self.aug["use_flip"],
+            )
+            val_set = CocoClsDataset(
+                img_root=val_img_root,
+                ann_path=str(val_ann),
+                img_size=self.img_size,
+                mode=self.cls_mode,
+                is_train=False,
+                use_color_aug=False,
+                use_hflip=False,
+            )
+            self.num_classes = int(train_set.num_classes)  # 0..C-1
+            collate_fn = None
 
         # 健壮性检查
         if len(train_set) == 0:
-            raise ValueError(
-                f"Train dataset is empty. Check paths:\n"
-                f"  img_root={train_img_root}\n"
-                f"  ann_path={self.train_label_path}\n"
-                f"以及 COCO JSON 里的 file_name 与实际文件是否匹配。"
-            )
+            raise ValueError(f"Train dataset is empty. Check paths:\n"
+                             f"  img_root={train_img_root}\n  ann_path={train_ann}")
         if len(val_set) == 0:
-            raise ValueError(
-                f"Val dataset is empty. Check paths:\n"
-                f"  img_root={val_img_root}\n"
-                f"  ann_path={self.test_label_path}\n"
-                f"以及 COCO JSON 里的 file_name 与实际文件是否匹配。"
-            )
+            raise ValueError(f"Val dataset is empty. Check paths:\n"
+                             f"  img_root={val_img_root}\n  ann_path={val_ann}")
 
-        train_loader = DataLoader(
-            train_set,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            drop_last=True,
-        )
-        val_loader = DataLoader(
-            val_set,
-            batch_size=min(self.batch_size, 64),
-            shuffle=False,
-            num_workers=max(1, self.num_workers // 2),
-            pin_memory=self.pin_memory,
-            drop_last=False,
-        )
+        train_loader = DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
+                                  num_workers=self.num_workers, pin_memory=self.pin_memory,
+                                  drop_last=True, collate_fn=collate_fn)
+        val_loader   = DataLoader(val_set, batch_size=min(self.batch_size, 64), shuffle=False,
+                                  num_workers=max(1, self.num_workers // 2), pin_memory=self.pin_memory,
+                                  drop_last=False, collate_fn=collate_fn)
 
+        print(f"[INFO] Task: {self.task} ({self.cls_mode if self.task=='cls' else ''})")
         print(f"[INFO] Train root: {train_img_root}")
         print(f"[INFO] Val   root: {val_img_root}")
         print(f"[INFO] Total train images: {len(train_set)}, val images: {len(val_set)}")
+        if self.num_classes is not None:
+            print(f"[INFO] num_classes: {self.num_classes}")
         return train_loader, val_loader
-
-    @staticmethod
-    def preview_label(label_t: torch.Tensor, save_path: str):
-        """快速把 label 的热图合成可视化存盘（用于调试）"""
-        with torch.no_grad():
-            l = label_t.detach().cpu().numpy()
-        J = 17
-        hm = l[:J].sum(axis=0)
-        hm = (hm / (hm.max() + 1e-6) * 255).astype(np.uint8)
-        hm = cv2.resize(hm, (192, 192))
-        cv2.imwrite(save_path, hm)

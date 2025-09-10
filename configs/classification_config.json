@@ -1,0 +1,15 @@
+{
+  "GPU_ID": "0",
+  "save_dir": "output/",
+  "random_seed": 42,
+  "task": "cls",
+  "task_params": { "cls_mode": "single_label" },
+  "dataset_root_path": "./data/coco2017",
+  "backbone": "mobilenet_v2",
+  "width_mult": 1.0,
+  "img_size": 224,
+  "use_color_aug": true, "use_flip": true,
+  "batch_size": 128, "epochs": 90,
+  "learning_rate": 0.001, "optimizer": "SGD",
+  "scheduler": "MultiStepLR-30,60,80-0.1", "weight_decay": 0.0001
+}

@@ -37,7 +37,7 @@ class CocoKeypointsDataset(Dataset):
                  rotate_deg: float = 30.0,
                  use_scale: bool = True,
                  scale_range: Tuple[float, float] = (0.75, 1.25),
-                 select_person: str = "largest",  # 或 "random"
+                 select_person: str = "largest",  # 在多人情况下，使用bbox最大或 "random"
                  is_train: bool = True):
         super().__init__()
         # 规范根目录为绝对路径

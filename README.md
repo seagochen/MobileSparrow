@@ -13,7 +13,7 @@ Google just release pre-train models(tfjs or tflite), which cannot be converted 
 
 ## How To Run
 
-1.Download COCO dataset2017 from https://cocodataset.org/. Or Use the following script to automatically download the dataset into the right place.
+1. Download COCO dataset2017 from https://cocodataset.org/. Or Use the following script to automatically download the dataset into the right place.
 
 ```bash
 ./scripts/get_coco2017.sh
@@ -52,27 +52,57 @@ python scripts/make_coco2017_for_movenet.py \
   --out-dir ./data/coco2017_movenet_sp
 ```
 
-3.You can add your own data to the same format.
+3. You can add your own data to the same format.
 
-4.After putting data at right place, you can start training
-```
-python train.py
+4. Before training your own model, prepare the configuration json file first.
+
+```json
+{
+  "GPU_ID": "0",
+  "random_seed": 42,
+  "cfg_verbose": true,
+
+  "task": "kpts",                         // "kpts" | "det" | "cls"
+  "task_params": {
+    "num_joints": 17,                     // kpts
+    "export_keypoints": true,             // kpts
+    "class_agnostic_nms": false,          // det
+    "cls_mode": "single_label"            // cls
+  },
+
+  "save_dir": "output/",
+  "dataset_root_path": "./data/coco2017",
+
+  "backbone": "mobilenet_v2",
+  "width_mult": 1.0,
+  "img_size": 256,
+  "target_stride": 4,                     // Only for kpts task
+
+  "use_color_aug": true,
+  "use_flip": true,
+  "use_rotate": true,
+  "rotate_deg": 30.0,
+  "use_scale": true,
+  "scale_range": [0.75, 1.25],
+  "gaussian_radius": 2,                   // Only for kpts task
+  "sigma_scale": 1.0,                     // Only for kpts task
+  "select_person": "largest",             // Only for kpts task
+
+  "pin_memory": true,
+  "num_workers": 8,
+  "batch_size": 64,
+  "epochs": 100,
+  "learning_rate": 0.00035,
+  "optimizer": "Adam",
+  "scheduler": "MultiStepLR-90,130-0.2",
+  "weight_decay": 0.0001,
+  "clip_gradient": 1.0,
+  "log_interval": 10
+}
 ```
 
-5.After training finished, you need to change the test model path to test. Such as this in predict.py
-```
-run_task.modelLoad("output/xxx.pth")
-```
+5. After choose 
 
-
-6.Run predict.py to show predict result, or run evaluate.py to compute my acc on test dataset.
-```
-python predict.py
-```
-7.Convert to onnx.
-```
-python pth2onnx.py
-```
 
 ## Training Results
 

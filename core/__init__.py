@@ -35,13 +35,17 @@ def setRandomSeed(seed=42):
 
 def init(cfg):
 
-    if cfg["cfg_verbose"]:
+    if cfg.get("cfg_verbose", False):
         print("=" * 80)
         print(cfg)
         print("=" * 80)
 
+    # Use GPU 0
     os.environ["CUDA_VISIBLE_DEVICES"] = cfg['GPU_ID']
-    setRandomSeed(cfg['random_seed'])
+    
+    # Set a random int
+    setRandomSeed(cfg.get('random_seed', random.randint(1, 1000)))
 
-    if not os.path.exists(cfg['save_dir']):
-        os.makedirs(cfg['save_dir'])
+    # Create a folder to store the trained model weights
+    if not os.path.exists(cfg.get('save_dir', 'output')):
+        os.makedirs(cfg.get('save_dir', 'output'))
