@@ -43,16 +43,30 @@ class CocoDetDataset(Dataset):
         self.use_scale = bool(use_scale)
         self.scale_range = tuple(scale_range)
 
-        # 类过滤（比如 [1] 表示 person-only）。None 表示不过滤。
-        self.class_filter = sorted(set(class_filter)) if class_filter else None
+        # 初始的 class_filter
+        self.class_filter = class_filter
 
         with open(self.ann_path, "r") as f:
             ann = json.load(f)
 
-        self.imgs = {im["id"]: im for im in ann["images"]}
-
         if "annotations" not in ann:
             raise ValueError("COCO instances-style json required (with 'annotations').")
+
+        # 如果 class_filter 为 None，则自动从标注文件中发现所有类别
+        if self.class_filter is None:
+            print("[INFO] class_filter is None. Auto-discovering all category IDs from annotation file.")
+            # 使用集合来自动去重，然后排序
+            all_cat_ids = sorted({
+                a["category_id"] for a in ann["annotations"] if "category_id" in a
+            })
+            self.class_filter = all_cat_ids
+            print(f"[INFO] Discovered {len(self.class_filter)} category IDs.")
+        
+        # 确保 class_filter 是排序且唯一的列表
+        if self.class_filter is not None:
+            self.class_filter = sorted(list(set(self.class_filter)))
+
+        self.imgs = {im["id"]: im for im in ann["images"]}
 
         # 过滤出合法 bbox & 非 crowd；如设置了 class_filter 再过滤类别
         anns = [

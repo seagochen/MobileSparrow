@@ -5,7 +5,7 @@
 
   "task": "det",
   "task_params": {
-    "class_filter": [],
+    "class_filter": null,
     "class_agnostic_nms": false
   },
 

@@ -21,7 +21,6 @@ COCO single-person square-crop generator (lean, keep official train/val only)
     person_keypoints_val2017.json
 """
 import argparse
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +28,8 @@ from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
+
+from scripts import common
 
 
 # ----------------------------
@@ -80,37 +81,6 @@ def parse_args():
         help="Print extra logs",
     )
     return parser.parse_args()
-
-
-# ----------------------------
-# 校验/加载
-# ----------------------------
-def validate_coco_root(root: Path) -> None:
-    ann_dir = root / "annotations"
-    train_dir = root / "train2017"
-    val_dir = root / "val2017"
-    for d in (ann_dir, train_dir, val_dir):
-        if not d.is_dir():
-            raise FileNotFoundError(f"Required directory not found: {d}")
-    required_ann_files = [
-        ann_dir / "person_keypoints_train2017.json",
-        ann_dir / "person_keypoints_val2017.json",
-    ]
-    missing = [str(p) for p in required_ann_files if not p.is_file()]
-    if missing:
-        raise FileNotFoundError("Missing keypoints annotation files:\n  " + "\n  ".join(missing))
-
-
-def load_json(path: Path) -> Dict:
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def index_by_image(annotations: List[Dict]) -> Dict[int, List[Dict]]:
-    by_img: Dict[int, List[Dict]] = {}
-    for ann in annotations:
-        by_img.setdefault(int(ann["image_id"]), []).append(ann)
-    return by_img
 
 
 # ----------------------------
@@ -197,14 +167,14 @@ class ImgRec:
 def collect_single_person_candidates(root: Path, split: str, min_visible_kpts: int, expand_ratio: float, verbose: bool):
     img_dir = root / f"{split}2017"
     ann_path = root / "annotations" / f"person_keypoints_{split}2017.json"
-    coco = load_json(ann_path)
+    coco = common.load_json(ann_path)
 
     images = coco["images"]
     annotations = coco["annotations"]
     categories = coco["categories"]
     info = coco.get("info", {})
     licenses = coco.get("licenses", [])
-    anns_by_img = index_by_image(annotations)
+    anns_by_img = common.index_by_image(annotations)
 
     # person 类 id
     person_cat_id = None
@@ -256,20 +226,6 @@ def collect_single_person_candidates(root: Path, split: str, min_visible_kpts: i
 # ----------------------------
 # 导出工具（写 COCO JSON + 图像）
 # ----------------------------
-def write_coco_json(path: Path, info: Dict, licenses: List[Dict], categories: List[Dict],
-                    images: List[Dict], annotations: List[Dict], desc_suffix: str):
-    out = {
-        "info": {**info, "description": desc_suffix},
-        "licenses": licenses,
-        "images": images,
-        "annotations": annotations,
-        "categories": categories,
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False)
-
-
 def save_crop_and_ann(rec: ImgRec, src_img_dir: Path, out_img_dir: Path,
                       next_image_id: int, next_ann_id: int, jpeg_quality: int):
     # 读图（兼容 unicode 路径）
@@ -321,15 +277,13 @@ def save_crop_and_ann(rec: ImgRec, src_img_dir: Path, out_img_dir: Path,
 # ----------------------------
 def main():
     args = parse_args()
-    validate_coco_root(args.root)
-
-    out_dir = args.out_dir
-    (out_dir / "images").mkdir(parents=True, exist_ok=True)
-    (out_dir / "annotations").mkdir(parents=True, exist_ok=True)
 
     src_splits = [s.strip() for s in args.splits.split(",") if s.strip() in {"train", "val"}]
     if not src_splits:
         raise ValueError("No valid splits specified. Use --splits train,val or a subset.")
+    
+    common.validate_coco_root(args.root, src_splits, ann_prefix="person_keypoints")
+    common.ensure_dir(args.out_dir / "images"); common.ensure_dir(args.out_dir / "annotations")
 
     # 逐个 split 导出
     ref_info = None; ref_licenses = None; ref_categories = None
@@ -349,8 +303,8 @@ def main():
         images, anns = [], []
         next_image_id, next_ann_id = 1, 1
 
-        out_img_dir = out_dir / "images" / f"{sp}2017"
-        out_ann_path = out_dir / "annotations" / f"person_keypoints_{sp}2017.json"
+        out_img_dir = args.out_dir / "images" / f"{sp}2017"
+        out_ann_path = args.out_dir / "annotations" / f"person_keypoints_{sp}2017.json"
 
         for r in recs:
             result = save_crop_and_ann(
@@ -370,7 +324,7 @@ def main():
             if args.verbose and (next_image_id - 1) % 500 == 0:
                 print(f"[{sp}] saved {next_image_id-1} items")
 
-        write_coco_json(
+        common.write_coco_json(
             path=out_ann_path,
             info=ref_info,
             licenses=ref_licenses,

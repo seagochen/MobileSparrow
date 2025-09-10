@@ -173,8 +173,25 @@ def cmd_train(cfg: Dict[str, Any]):
 
     print("[OK] Training finished.")
 
+def _forward_raw(model, x):
+    """
+    兼容两种返回：eval 下若返回 list（已后处理的检测结果），
+    则临时切到 train 模式拿原始 dict（cls_logits/bbox_regs/anchors）。
+    """
+    y = model(x)
+    if isinstance(y, dict):
+        return y
+    prev = model.training
+    model.train(True)
+    y = model(x)
+    model.train(prev)
+    if isinstance(y, dict):
+        return y
+    raise RuntimeError("Model did not return raw dict in either eval or train mode.")
+
 @torch.no_grad()
 def _validate(model, val_loader, criterion, device):
+    was_training = model.training
     model.eval()
     tot, n = 0.0, 0
     for imgs, targets in val_loader:
@@ -183,9 +200,11 @@ def _validate(model, val_loader, criterion, device):
         t_labels= [t["labels"].to(device) for t in targets]
         batch_targets = {"boxes": t_boxes, "labels": t_labels}
 
-        out = model(imgs)
+        out = _forward_raw(model, imgs)
         loss, meter = criterion(out["cls_logits"], out["bbox_regs"], out["anchors"], batch_targets)
         tot += float(loss.item()); n += 1
+    if was_training:
+        model.train(True)
     avg = tot / max(1, n)
     print(f"[Val] loss {avg:.4f}")
     return avg
@@ -322,7 +341,7 @@ def cmd_export_onnx(cfg: Dict[str, Any], weights: str | None, out_path: str, ops
                 return y["cls_logits"], y["bbox_regs"], y["anchors"]
             else:
                 # 若 eval 返回 list，则强制走训练路径
-                self.m.train(False)
+                self.m.train(True)
                 z = self.m(x)
                 return z["cls_logits"], z["bbox_regs"], z["anchors"]
 
