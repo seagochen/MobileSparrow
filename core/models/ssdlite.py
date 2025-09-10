@@ -115,6 +115,11 @@ class SSDLiteDet(nn.Module):
             A = len(self._per_level_scales[i]) * len(self._per_level_ratios[i])
             self.heads.append(SSDLiteHead(in_ch, A, self.num_classes, midc=self._head_midc))
 
+        # 把创建好的 head 迁移到与特征相同的 device 避免 CPU/CUDA 混用
+        dev = feats[0].device
+        for m in self.heads:
+            m.to(dev)
+
         self.anchor_gen = AnchorGenerator(self._per_level_scales, self._per_level_ratios)
         self._heads_built = True
 
