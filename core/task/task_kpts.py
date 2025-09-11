@@ -9,7 +9,8 @@ from typing import Tuple, Dict, List, Iterable, Union
 
 import torch
 import torch.nn as nn
-import torch.cuda.amp as amp
+# import torch.cuda.amp as amp
+from torch.amp import autocast, GradScaler
 
 from core.loss.movenet_loss import MovenetLoss
 from core.task import common
@@ -144,8 +145,8 @@ def movenetDecode(data,
             # reg_y_o = (regs[dim0, dim1 + n * 2 + 1, cy, cx] + 0.5).astype(np.int32)
             # reg_x = (reg_x_o + cx).clip(0, W - 1)
             # reg_y = (reg_y_o + cy).clip(0, H - 1)
-            reg_x = (regs[..., n * 2,     cy, cx] + cx).astype(np.float32)
-            reg_y = (regs[..., n * 2 + 1, cy, cx] + cy).astype(np.float32)
+            reg_x = (regs[dim0, dim1 + n * 2, cy, cx] + cx).astype(np.float32)
+            reg_y = (regs[dim0, dim1 + n * 2 + 1, cy, cx] + cy).astype(np.float32)
             reg_x = np.clip(reg_x, 0, W - 1)
             reg_y = np.clip(reg_y, 0, H - 1)
             # ----
@@ -192,10 +193,18 @@ def movenetDecode(data,
 
         res = []
         for n in range(J):
-            reg_x_o = (regs[dim0, dim1 + n * 2,     cy, cx] + 0.5).astype(np.int32)
-            reg_y_o = (regs[dim0, dim1 + n * 2 + 1, cy, cx] + 0.5).astype(np.int32)
-            jx = (reg_x_o + cx).clip(0, W - 1)
-            jy = (reg_y_o + cy).clip(0, H - 1)
+            # <修改 2025/09/11>
+            # reg_x_o = (regs[dim0, dim1 + n * 2,     cy, cx] + 0.5).astype(np.int32)
+            # reg_y_o = (regs[dim0, dim1 + n * 2 + 1, cy, cx] + 0.5).astype(np.int32)
+            # jx = (reg_x_o + cx).clip(0, W - 1)
+            # jy = (reg_y_o + cy).clip(0, H - 1)
+            # 新（浮点，与 output 分支一致）
+            reg_x = (regs[dim0, dim1 + n * 2, cy, cx] + cx).astype(np.float32)
+            reg_y = (regs[dim0, dim1 + n * 2 + 1, cy, cx] + cy).astype(np.float32)
+            # 关键修改：在clip之后，将浮点坐标转换为整数索引
+            jx = np.clip(reg_x, 0, W - 1).astype(np.int32)
+            jy = np.clip(reg_y, 0, H - 1).astype(np.int32)
+            # ----
 
             off_x = offsets[dim0, dim1 + n * 2,     jy, jx]
             off_y = offsets[dim0, dim1 + n * 2 + 1, jy, jx]
@@ -273,7 +282,8 @@ class KptsTask():
 
         # <新增 2025/09/11> AMP
         self.amp_enabled = bool(self.cfg.get("amp", True))
-        self.scaler = amp.GradScaler(enabled=self.amp_enabled)
+        # self.scaler = amp.GradScaler(enabled=self.amp_enabled)
+        self.scaler = GradScaler('cuda', enabled=self.amp_enabled)
 
         # <新增 2025/09/11> EMA
         self.ema_enabled = bool(self.cfg.get("ema", True))
@@ -334,7 +344,7 @@ class KptsTask():
             # self.optimizer.step()
             #
             # 为下面内容
-            with amp.autocast(enabled=self.amp_enabled):
+            with autocast('cuda', enabled=self.amp_enabled):
                 raw_out = self.model(imgs)
                 out_list, out_dict = self._align_output_for_loss_and_decode(raw_out)
                 heatmap_loss, bone_loss, center_loss, regs_loss, offset_loss = self.loss_func(out_list, labels,
@@ -451,13 +461,22 @@ class KptsTask():
         torch.save(last_state, os.path.join(self.save_dir, "last.pt"))
         # ----
 
+        # <修改 2025/09/11>
+        # if val_acc > self.best_score:
+        #     self.best_score = val_acc
+        #     best_path = os.path.join(self.save_dir, "best.pt")
+        #     torch.save(self.model.state_dict(), best_path)
+        #     print(f"[INFO] New best: acc={val_acc:.5f}  -> saved to {best_path}")
+        # 新（保存 EMA）
         if val_acc > self.best_score:
             self.best_score = val_acc
             best_path = os.path.join(self.save_dir, "best.pt")
-            torch.save(self.model.state_dict(), best_path)
+            best_state = (self.ema.ema if self.ema_enabled else self.model).state_dict()
+            torch.save(best_state, best_path)
             print(f"[INFO] New best: acc={val_acc:.5f}  -> saved to {best_path}")
         else:
             print(f"[INFO] Kept best: acc={self.best_score:.5f}  (current {val_acc:.5f})")
+        # ----
 
     def onTrainEnd(self):
         del self.model
