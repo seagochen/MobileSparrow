@@ -22,10 +22,10 @@ Originally a MoveNet (17 keypoints) re-implementation, now extended to **MobileN
 
 ## 0) Dependencies (example)
 
+You can use `pip install -r requirements.txt` to install necessary packages for this project.
+
 ```bash
-pip install torch torchvision
-pip install opencv-python numpy
-pip install pycocotools onnx onnxruntime   # optional for eval/export
+pip install -r requirements.txt
 ```
 
 ---
@@ -38,7 +38,7 @@ Download COCO2017 (or use the helper script):
 ./scripts/get_coco2017.sh
 ```
 
-Expected structure:
+When the zip packages are ready, it will unfold into the following structure:
 
 ```
 data/
@@ -88,8 +88,8 @@ python scripts/make_coco2017_for_ssdlite.py \
   --root ./data/coco2017 \
   --out-dir ./data/coco2017_det_5cls \
   --class-names person,car,bicycle,dog,chair \
-  --skip-crowd --min-box-area 16 \
-  --copy-mode symlink
+  --skip-crowd \
+  --min-box-area 16
 ```
 
 > You may also keep all classes at data stage and restrict classes **at train time** via `task_params.class_filter` (e.g. `[1]` for person-only).
@@ -104,7 +104,7 @@ data/coco2017_det_5cls/
 
 ---
 
-## 3) Unified Config (one JSON for three tasks)
+## 3) Unified Config (one JSON for different tasks)
 
 ```json
 {
@@ -194,7 +194,7 @@ python ssdlite_cli.py --config configs/ssdlite_config.json export-onnx \
   --out output/ssdlite.onnx --dynamic --verify
 ```
 
-**ONNX (detection)**
+**ONNX (detection - Planning)**
 
 * Outputs:
 
@@ -208,60 +208,53 @@ python ssdlite_cli.py --config configs/ssdlite_config.json export-onnx \
 ## 5) Layout (high level)
 
 ```
-core/
-  datasets/
-    coco_loader.py      # unified entry: kpts/det/cls (train+val only)
-    coco_kpts.py        # keypoints
-    coco_det.py         # detection (supports class_filter)
-    coco_cls.py         # classification (placeholder/extensions)
-    common.py           # letterbox, color/geom aug, etc.
-  models/
-    mobilenet_v2.py / shufflenet_v2.py
-    fpn_lite.py
-    ssdlite.py          # lazy head build (now auto device-moved)
-    heads/
-      ssd_head.py
-  loss/
-    ssd_loss.py         # logging uses .detach().item() (no warnings)
-scripts/
-  make_coco2017_for_movenet.py   # lean (official train/val)
-  make_coco2017_for_ssdlite.py   # lean (official train/val)
-movenet_cli.py
-ssdlite_cli.py
+.
+├── LICENSE
+├── README.md
+├── configs
+│   ├── classification_config.json
+│   ├── movenet_config.json
+│   └── ssdlite_config.json
+├── core
+│   ├── datasets
+│   │   ├── coco_cls.py
+│   │   ├── coco_det.py
+│   │   ├── coco_kpts.py
+│   │   ├── coco_loader.py
+│   │   ├── common.py
+│   │   └── simple_loader.py
+│   ├── loss
+│   │   ├── movenet_loss.py
+│   │   └── ssd_loss.py
+│   ├── models
+│   │   ├── backbones
+│   │   │   ├── mobilenet_v2.py
+│   │   │   └── shufflenet_v2.py
+│   │   ├── heads
+│   │   │   ├── movenet_head.py
+│   │   │   └── ssd_head.py
+│   │   ├── movenet.py
+│   │   ├── necks
+│   │   │   └── fpn_lite.py
+│   │   ├── onnx
+│   │   │   ├── dummy_movenet.py
+│   │   │   └── dummy_ssdlite.py
+│   │   └── ssdlite.py
+│   ├── task
+│   │   ├── task_det.py
+│   │   └── task_kpts.py
+│   └── utils
+│       └── paths.py
+├── movenet_cli.py
+├── output
+├── requirements.txt
+├── scripts
+│   ├── common.py
+│   ├── get_coco2017.sh
+│   ├── make_coco2017_for_movenet.py
+│   └── make_coco2017_for_ssdlite.py
+└── ssdlite_cli.py
 ```
-
----
-
-## 6) FAQ
-
-* **RuntimeError: weight on CPU, input on CUDA**
-  SSDLite heads are lazily created on first forward. They’re now explicitly moved to the same device as features.
-
-* **UserWarning: Converting a tensor with requires\_grad=True to a scalar**
-  Fixed in `ssd_loss.py` by using `tensor.detach().item()` for logging while keeping `loss` as a Tensor.
-
-* **Val split missing**
-  Loader requires `train2017` + `val2017`. Check `dataset_root_path` and the `annotations/*_val2017.json`.
-
----
-
-## 7) Training Tips
-
-* **Data matters most**: curate/clean data; add domain frames (yoga/fitness/dance)
-* **Backbones**: try MobileNetV3 / ShuffleNetV2 within your budget
-* **Losses**: for pose, consider skeleton priors; for detection, FocalLoss/GIoU can help (current setup is stable)
-
----
-
-## 8) Resources
-
-1. Next-Generation Pose Detection with MoveNet and TensorFlow\.js
-2. MoveNet Model Card (PDF)
-3. TFHub: `movenet/singlepose/lightning`
-4. Article (Chinese): Lightweight Pose Estimation & MoveNet reproduction notes
-
----
-
 ## License
 
 MIT (see the badge link above)
