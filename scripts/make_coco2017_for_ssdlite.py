@@ -17,6 +17,7 @@ COCO detection subset generator for SSDLite (lean)
     instances_train2017.json
     instances_val2017.json
 """
+import sys
 import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
@@ -209,7 +210,7 @@ def main():
     if not src_splits:
         raise ValueError("No valid splits specified. Use --splits train,val or a subset.")
 
-    common.validate_coco_root(args.root, src_splits)
+    common.validate_coco_root(args.root, src_splits, ann_prefix="instances")
     common.ensure_dir(args.out_dir / "images"); common.ensure_dir(args.out_dir / "annotations")
 
     # 类过滤（两者都为空 => 全部类别）
