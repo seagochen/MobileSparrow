@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 import os
 import gc
+from copy import deepcopy
+
 import cv2
 import numpy as np
 from typing import Tuple, Dict, List, Iterable, Union
 
 import torch
 import torch.nn as nn
+import torch.cuda.amp as amp
 
 from core.loss.movenet_loss import MovenetLoss
 from core.task import common
@@ -136,10 +139,16 @@ def movenetDecode(data,
 
         res = []
         for n in range(num_joints):
-            reg_x_o = (regs[dim0, dim1 + n * 2,     cy, cx] + 0.5).astype(np.int32)
-            reg_y_o = (regs[dim0, dim1 + n * 2 + 1, cy, cx] + 0.5).astype(np.int32)
-            reg_x = (reg_x_o + cx).clip(0, W - 1)
-            reg_y = (reg_y_o + cy).clip(0, H - 1)
+            # <修改 2025/09/11>
+            # reg_x_o = (regs[dim0, dim1 + n * 2,     cy, cx] + 0.5).astype(np.int32)
+            # reg_y_o = (regs[dim0, dim1 + n * 2 + 1, cy, cx] + 0.5).astype(np.int32)
+            # reg_x = (reg_x_o + cx).clip(0, W - 1)
+            # reg_y = (reg_y_o + cy).clip(0, H - 1)
+            reg_x = (regs[..., n * 2,     cy, cx] + cx).astype(np.float32)
+            reg_y = (regs[..., n * 2 + 1, cy, cx] + cy).astype(np.float32)
+            reg_x = np.clip(reg_x, 0, W - 1)
+            reg_y = np.clip(reg_y, 0, H - 1)
+            # ----
 
             reg_x_hw = np.broadcast_to(reg_x.reshape(B, 1, 1, 1), (B, 1, H, W)).astype(np.float32)
             reg_y_hw = np.broadcast_to(reg_y.reshape(B, 1, 1, 1), (B, 1, H, W)).astype(np.float32)
@@ -208,6 +217,29 @@ def movenetDecode(data,
 # =========================
 # The Task class
 # =========================
+
+# <新增 2025/09/11>
+class ModelEMA:
+    def __init__(self, model, decay=0.9998, device=None):
+        self.ema = deepcopy(model).eval()
+        self.decay = float(decay)
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+        if device is not None:
+            self.ema.to(device)
+
+    @torch.no_grad()
+    def update(self, model):
+        d = self.decay
+        msd = model.state_dict()
+        for k, v in self.ema.state_dict().items():
+            if k in msd:
+                v.copy_(v * d + msd[k] * (1.0 - d))
+
+    def state_dict(self):
+        return self.ema.state_dict()
+
+
 class KptsTask():
     def __init__(self, cfg, model):
         self.cfg = cfg
@@ -238,6 +270,17 @@ class KptsTask():
             )
         )
         os.makedirs(self.save_dir, exist_ok=True)
+
+        # <新增 2025/09/11> AMP
+        self.amp_enabled = bool(self.cfg.get("amp", True))
+        self.scaler = amp.GradScaler(enabled=self.amp_enabled)
+
+        # <新增 2025/09/11> EMA
+        self.ema_enabled = bool(self.cfg.get("ema", True))
+        self.ema_decay = float(self.cfg.get("ema_decay", 0.9998))
+        if self.ema_enabled:
+            self.ema = ModelEMA(self.model, decay=self.ema_decay, device=self.device)
+
 
     def _align_output_for_loss_and_decode(self, output) -> Tuple[List[torch.Tensor], Dict[str, torch.Tensor]]:
         """
@@ -275,18 +318,44 @@ class KptsTask():
             labels = labels.to(self.device)
             kps_mask = kps_mask.to(self.device)
 
-            raw_out = self.model(imgs)
-            out_list, out_dict = self._align_output_for_loss_and_decode(raw_out)
-
-            # loss
-            heatmap_loss, bone_loss, center_loss, regs_loss, offset_loss = self.loss_func(out_list, labels, kps_mask)
-            total_loss = heatmap_loss + center_loss + regs_loss + offset_loss + bone_loss
+            # <替换 2025/09/11>
+            #
+            # raw_out = self.model(imgs)
+            # out_list, out_dict = self._align_output_for_loss_and_decode(raw_out)
+            #
+            # # loss
+            # heatmap_loss, bone_loss, center_loss, regs_loss, offset_loss = self.loss_func(out_list, labels, kps_mask)
+            # total_loss = heatmap_loss + center_loss + regs_loss + offset_loss + bone_loss
+            #
+            # self.optimizer.zero_grad(set_to_none=True)
+            # total_loss.backward()
+            # if self.cfg.get('clip_gradient', 0):
+            #     common.clipGradient(self.optimizer, float(self.cfg['clip_gradient']))
+            # self.optimizer.step()
+            #
+            # 为下面内容
+            with amp.autocast(enabled=self.amp_enabled):
+                raw_out = self.model(imgs)
+                out_list, out_dict = self._align_output_for_loss_and_decode(raw_out)
+                heatmap_loss, bone_loss, center_loss, regs_loss, offset_loss = self.loss_func(out_list, labels,
+                                                                                              kps_mask)
+                total_loss = heatmap_loss + center_loss + regs_loss + offset_loss + bone_loss
 
             self.optimizer.zero_grad(set_to_none=True)
-            total_loss.backward()
+            self.scaler.scale(total_loss).backward()
+
+            # 若要梯度裁剪，需先 unscale
             if self.cfg.get('clip_gradient', 0):
+                self.scaler.unscale_(self.optimizer)
                 common.clipGradient(self.optimizer, float(self.cfg['clip_gradient']))
-            self.optimizer.step()
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            # EMA
+            if self.ema_enabled:
+                self.ema.update(self.model)
+            # <替换结束 2025/09/11>
 
             # evaluate (decode both pred & label)
             pre = movenetDecode(out_dict, kps_mask, mode='output')
@@ -318,12 +387,21 @@ class KptsTask():
         n_batches = 0
 
         with torch.no_grad():
+            # <新增 2025/09/11>
+            net = self.ema.ema if getattr(self, "ema_enabled", False) and self.ema_enabled else self.model
+            # ----
+
             for batch_idx, (imgs, labels, kps_mask, img_names) in enumerate(val_loader):
                 imgs = imgs.to(self.device)
                 labels = labels.to(self.device)
                 kps_mask = kps_mask.to(self.device)
 
-                raw_out = self.model(imgs)
+                # <修改 2025/09/11>
+                # raw_out = self.model(imgs)
+                # 为
+                raw_out = net(imgs)  # <-- 用 EMA
+                # ----
+
                 out_list, out_dict = self._align_output_for_loss_and_decode(raw_out)
 
                 heatmap_loss, bone_loss, center_loss, regs_loss, offset_loss = self.loss_func(out_list, labels, kps_mask)
@@ -363,9 +441,15 @@ class KptsTask():
         else:
             self.scheduler.step()
 
-        # 保存 last.pt / best.pt
-        last_path = os.path.join(self.save_dir, "last.pt")
-        torch.save(self.model.state_dict(), last_path)
+        # <修改 2025/09/11>
+        # # 保存 last.pt / best.pt
+        # last_path = os.path.join(self.save_dir, "last.pt")
+        # torch.save(self.model.state_dict(), last_path)
+        # 为
+        # 保存 last/best 也要用 EMA
+        last_state = (self.ema.ema if self.ema_enabled else self.model).state_dict()
+        torch.save(last_state, os.path.join(self.save_dir, "last.pt"))
+        # ----
 
         if val_acc > self.best_score:
             self.best_score = val_acc
@@ -408,9 +492,19 @@ class KptsTask():
         os.makedirs(save_dir, exist_ok=True)
         self.model.eval()
         with torch.no_grad():
+
+            # <新增 2025/09/11>
+            net = self.ema.ema if getattr(self, "ema_enabled", False) and self.ema_enabled else self.model
+            # ----
+
             for (img, img_name) in data_loader:
                 img = img.to(self.device)
-                output = self.model(img)
+
+                # < 修改 2025/09/11>
+                # output = self.model(img)
+                output = net(img)  # <-- 用 EMA
+                # ----
+
                 _, out_dict = self._align_output_for_loss_and_decode(output)
 
                 pre = movenetDecode(out_dict, None, mode='output')
@@ -457,12 +551,20 @@ class KptsTask():
         right_count = np.zeros(self.num_joints, dtype=np.int64)
         total_count = 0
         with torch.no_grad():
+            # <新增 2025/09/11>
+            net = self.ema.ema if getattr(self, "ema_enabled", False) and self.ema_enabled else self.model
+            # ----
+
             for batch_idx, (imgs, labels, kps_mask, img_names) in enumerate(data_loader):
                 imgs = imgs.to(self.device)
                 labels = labels.to(self.device)
                 kps_mask = kps_mask.to(self.device)
 
-                output = self.model(imgs)
+                # < 修改 2025/09/11>
+                # output = self.model(imgs)
+                output = net(imgs)  # <-- 用 EMA
+                # ----
+
                 _, out_dict = self._align_output_for_loss_and_decode(output)
 
                 pre = movenetDecode(out_dict, kps_mask, mode='output')

@@ -31,6 +31,14 @@ class CocoKeypointsDataset(Dataset):
                  target_stride: int = 4,
                  gaussian_radius: int = 2,
                  sigma_scale: float = 1.0,
+
+                 # <新增 2025/09/11>
+                 use_dynamic_radius: bool = True,
+                 kpt_radius_factor: float = 0.025,
+                 ctr_radius_factor: float = 0.035,
+                 min_radius: int = 1,
+                 # <新增 2025/09/11>
+
                  use_color_aug: bool = True,
                  use_flip: bool = True,
                  use_rotate: bool = True,
@@ -50,6 +58,14 @@ class CocoKeypointsDataset(Dataset):
 
         self.gr = int(gaussian_radius)
         self.sigma_scale = float(sigma_scale)
+
+        # <新增 2025/09/11>
+        self.use_dynamic_radius = bool(use_dynamic_radius)
+        self.kpt_radius_factor = float(kpt_radius_factor)
+        self.ctr_radius_factor = float(ctr_radius_factor)
+        self.min_radius = int(min_radius)
+        # -----
+
         self.is_train = is_train
 
         self.use_color_aug = use_color_aug
@@ -93,7 +109,7 @@ class CocoKeypointsDataset(Dataset):
         #     if os.path.isfile(img_path):
         #         self.items.append((img_path, anns))
 
-        # 为图中的每一个人都创建一个独立的样本
+        # <新增 2025/09/11> 为图中的每一个人都创建一个独立的样本
         self.items: List[Tuple[str, Dict[str, Any]]] = []
         for img_id, anns in imgid_to_anns.items():
             info = self.imgid_to_info.get(img_id)
@@ -189,20 +205,53 @@ class CocoKeypointsDataset(Dataset):
         kps_f[:, 0] = kps_f[:, 0] / self.stride
         kps_f[:, 1] = kps_f[:, 1] / self.stride
 
-        # 画 heatmaps
+        # <新增 2025/09/11> 根据可见关键点的外接框来估算人尺度
+        vis = (kps_f[:, 2] > 0)
+        if np.any(vis):
+            xs, ys = kps_f[vis, 0], kps_f[vis, 1]
+            w_box = float(xs.max() - xs.min())
+            h_box = float(ys.max() - ys.min())
+            side = max(1.0, max(w_box, h_box))  # 至少为1，避免0除
+        else:
+            side = float(max(self.Wf, self.Hf)) / 4.0  # 兜底
+
+        # 计算关键点与中心的半径
+        if self.use_dynamic_radius:
+            r_kpt = max(self.min_radius, int(round(self.kpt_radius_factor * side)))
+            r_ctr = max(self.min_radius + 1, int(round(self.ctr_radius_factor * side)))
+        else:
+            r_kpt = int(self.gr)
+            r_ctr = int(self.gr + 1)
+
+        # # 画 heatmaps
+        # for j in range(J):
+        #     v = kps_f[j, 2]
+        #     if v > 0:
+        #         xj, yj = kps_f[j, 0], kps_f[j, 1]
+        #         if xj >= 0 and yj >= 0 and xj < self.Wf and yj < self.Hf:
+        #             draw_gaussian(heatmaps[j], (int(round(xj)), int(round(yj))), self.gr, k=self.sigma_scale)
+        #             kps_mask[j] = 1.0
+
+        # <修改 2025/09/11> 使用 r_kpt 画 heatmaps
         for j in range(J):
             v = kps_f[j, 2]
             if v > 0:
                 xj, yj = kps_f[j, 0], kps_f[j, 1]
-                if xj >= 0 and yj >= 0 and xj < self.Wf and yj < self.Hf:
-                    draw_gaussian(heatmaps[j], (int(round(xj)), int(round(yj))), self.gr, k=self.sigma_scale)
+                if 0 <= xj < self.Wf and 0 <= yj < self.Hf:
+                    draw_gaussian(heatmaps[j], (int(round(xj)), int(round(yj))), r_kpt, k=self.sigma_scale)
                     kps_mask[j] = 1.0
 
-        # 画 center（用 center_xy）
+        # # 画 center（用 center_xy）
+        # cx = center_xy[0] / self.stride
+        # cy = center_xy[1] / self.stride
+        # if 0 <= cx < self.Wf and 0 <= cy < self.Hf:
+        #     draw_gaussian(centers[0], (int(round(cx)), int(round(cy))), self.gr + 1, k=self.sigma_scale)
+
+        # <修改 2025/09/11> 使用 r_crt 画 center
         cx = center_xy[0] / self.stride
         cy = center_xy[1] / self.stride
         if 0 <= cx < self.Wf and 0 <= cy < self.Hf:
-            draw_gaussian(centers[0], (int(round(cx)), int(round(cy))), self.gr + 1, k=self.sigma_scale)
+            draw_gaussian(centers[0], (int(round(cx)), int(round(cy))), r_ctr, k=self.sigma_scale)
 
         # 计算 regs（以中心网格为锚，写 dx,dy 的整数位）
         cx_i = int(np.clip(np.floor(cx + 0.5), 0, self.Wf - 1))
@@ -211,8 +260,10 @@ class CocoKeypointsDataset(Dataset):
             if kps_mask[j] > 0:
                 dx = kps_f[j, 0] - cx
                 dy = kps_f[j, 1] - cy
-                regs[2 * j,     cy_i, cx_i] = float(np.floor(dx))
-                regs[2 * j + 1, cy_i, cx_i] = float(np.floor(dy))
+                # regs[2 * j,     cy_i, cx_i] = float(np.floor(dx))
+                # regs[2 * j + 1, cy_i, cx_i] = float(np.floor(dy))
+                regs[2 * j,     cy_i, cx_i] = float(dx)
+                regs[2 * j + 1, cy_i, cx_i] = float(dy)
 
         # 计算 offsets（在每个关键点所在网格记录小数偏移）
         for j in range(J):
