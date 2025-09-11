@@ -21,6 +21,11 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
 
+# 把“项目根目录”（scripts 的父目录）加入 sys.path
+proj_root = Path(__file__).resolve().parent.parent
+if str(proj_root) not in sys.path:
+    sys.path.insert(0, str(proj_root))
+
 from scripts import common
 
 

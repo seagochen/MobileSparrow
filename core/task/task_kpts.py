@@ -1,13 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-Unified Task file (refined)
-- merges old task.py + task_tools.py + metrics.py (myAcc)
-- Compatible with dict outputs: {"heatmaps","centers","regs","offsets"}
-- Dynamic HxW decoding (no hard-coded 48)
-- Auto-align model heads to label feature size (default img_size//4)
-- Stable path handling for img_name (nested -> str)
-"""
-
 import os
 import gc
 import cv2
@@ -16,11 +7,9 @@ from typing import Tuple, Dict, List, Iterable, Union
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
 
-# ====== external (keep your existing loss) ======
 from core.loss.movenet_loss import MovenetLoss
-
+from core.task import common
 
 # =========================
 # >>> metrics (inlined) <<<
@@ -53,51 +42,6 @@ def myAcc(output: np.ndarray, target: np.ndarray) -> np.ndarray:
     dist = _getDist(output, target)
     cate_acc = _getAccRight(dist)
     return cate_acc
-
-
-# =========================
-# Schedulers / Optimizers
-# =========================
-def getSchedu(schedu: str, optimizer):
-    if 'default' in schedu:
-        factor = float(schedu.strip().split('-')[1])
-        patience = int(schedu.strip().split('-')[2])
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=factor, patience=patience, min_lr=1e-6
-        )
-    elif 'step' in schedu:
-        step_size = int(schedu.strip().split('-')[1])
-        gamma = float(schedu.strip().split('-')[2])
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma, last_epoch=-1)
-    elif 'SGDR' in schedu:
-        T_0 = int(schedu.strip().split('-')[1])
-        T_mult = int(schedu.strip().split('-')[2])
-        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=T_0, T_mult=T_mult)
-    elif 'MultiStepLR' in schedu:
-        milestones = [int(x) for x in schedu.strip().split('-')[1].split(',')]
-        gamma = float(schedu.strip().split('-')[2])
-        scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
-    else:
-        raise Exception("Unknown scheduler.")
-    return scheduler
-
-
-def getOptimizer(optims: str, model, learning_rate: float, weight_decay: float):
-    if optims == 'Adam':
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    elif optims == 'SGD':
-        optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
-    else:
-        raise Exception("Unknown optimizer.")
-    return optimizer
-
-
-def clipGradient(optimizer, grad_clip=1.0):
-    for group in optimizer.param_groups:
-        for param in group["params"]:
-            if param.grad is not None:
-                param.grad.data.clamp_(-grad_clip, grad_clip)
-
 
 # =========================
 # Output helpers (compat)
@@ -273,11 +217,11 @@ class KptsTask():
 
         # ===== loss / optim / sched =====
         self.loss_func = MovenetLoss()
-        self.optimizer = getOptimizer(self.cfg['optimizer'],
-                                      self.model,
-                                      self.cfg['learning_rate'],
-                                      self.cfg['weight_decay'])
-        self.scheduler = getSchedu(self.cfg['scheduler'], self.optimizer)
+        self.optimizer = common.getOptimizer(self.cfg['optimizer'],
+                                             self.model,
+                                             self.cfg['learning_rate'],
+                                             self.cfg['weight_decay'])
+        self.scheduler = common.getSchedu(self.cfg['scheduler'], self.optimizer)
 
         # ===== alignment target (label map size) =====
         self.img_size = int(self.cfg.get("img_size", 192))
@@ -341,7 +285,7 @@ class KptsTask():
             self.optimizer.zero_grad(set_to_none=True)
             total_loss.backward()
             if self.cfg.get('clip_gradient', 0):
-                clipGradient(self.optimizer, float(self.cfg['clip_gradient']))
+                common.clipGradient(self.optimizer, float(self.cfg['clip_gradient']))
             self.optimizer.step()
 
             # evaluate (decode both pred & label)

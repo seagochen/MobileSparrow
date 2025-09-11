@@ -308,7 +308,7 @@ def build_parser():
         epilog=epilog_msg,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--config", type=str, default="config.json", help="路径: JSON 配置文件")
+    p.add_argument("--config", type=str, default="configs/movenet_config.json", help="路径: JSON 配置文件")
     p.add_argument("--save-dir", type=str, help="覆盖 cfg.save_dir (保存权重与结果)")
     p.add_argument("--img-size", type=int, help="覆盖 cfg.img_size (输入图像大小, 默认192)")
     p.add_argument("--num-classes", type=int, help="覆盖 cfg.num_classes (关键点个数, 默认17)")

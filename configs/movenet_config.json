@@ -3,34 +3,37 @@
   "random_seed": 42,
   "cfg_verbose": true,
 
-  "task": "kpts", 
+  "task": "kpts",
   "task_params": {
     "num_joints": 17,
     "export_keypoints": true
   },
 
-  "save_dir": "output/",
-  "dataset_root_path":  "./data/coco2017_movenet_sp",
+  "save_dir": "output/movenet",
+  "dataset_root_path": "./data/coco2017_movenet_sp",
 
   "backbone": "mobilenet_v2",
-  "width_mult": 1.0,
-  "img_size": 256,
+  "width_mult": 1.4,
+  "neck_outc": 64,
+  "head_midc": 32,
+
+  "img_size": 192,
   "target_stride": 4,
 
   "use_color_aug": true,
   "use_flip": true,
   "use_rotate": true,
-  "rotate_deg": 30.0,
+  "rotate_deg": 12.0,
   "use_scale": true,
-  "scale_range": [0.75, 1.25],
+  "scale_range": [0.6, 1.25],
   "gaussian_radius": 2,
-  "sigma_scale": 1.0, 
+  "sigma_scale": 1.0,
   "select_person": "largest",
 
   "pin_memory": true,
   "num_workers": 8,
   "batch_size": 64,
-  "epochs": 100,
+  "epochs": 140,
   "learning_rate": 0.00035,
   "optimizer": "Adam",
   "scheduler": "MultiStepLR-90,130-0.2",

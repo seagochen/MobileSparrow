@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-SSDLite Unified CLI
-- train:        训练并保存 last.pt / best.pt
-- eval:         在验证集上评估（loss proxy）
+SSDLite Unified CLI (refactored to use existing classes)
+- train:        训练并保存 last.pt / best.pt（DetTask）
+- eval:         在验证集上评估（loss proxy，DetTask.onValidation）
 - predict:      对目录图片推理并可视化
 - export-onnx:  导出 ONNX（三输出：cls_logits / bbox_regs / anchors）
 - show-config:  打印合并后的最终配置
@@ -12,26 +12,23 @@ SSDLite Unified CLI
 依赖：PyTorch、opencv-python、numpy、onnx(导出时)、onnxruntime(可选验证)
 """
 
-import os
-import cv2
-import json
-import glob
-import math
-import random
 import argparse
+import glob
+import json
+import os
+import random
 from pathlib import Path
-from typing import Any, Dict, Tuple, List
+from typing import Any, Dict
 
+import cv2
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
 import core
-from core.datasets.coco_loader import CoCo2017DataLoader   # 统一入口（kpts/det/cls）  ← 使用它拿到 det 的 DataLoader
-from core.models.ssdlite import SSDLiteDet                 # 你的 SSDLite 模型                    :contentReference[oaicite:5]{index=5}
-from core.loss.ssd_loss import SSDLoss                     # 你的检测损失
-from core.datasets.common import letterbox                 # 复用 letterbox 与训练对齐
-# 参考：movenet_cli.py 的结构/参数覆盖/日志风格                               :contentReference[oaicite:6]{index=6}
+from core.datasets.coco_loader import CoCo2017DataLoader
+from core.datasets.common import letterbox
+from core.models.ssdlite import SSDLiteDet
+from core.task.task_det import DetTask
 
 
 # -------------------------
@@ -67,7 +64,7 @@ def build_data(cfg: Dict[str, Any]):
     使用统一 DataLoader（task='det'）拿到训练/验证 Loader；
     同时 data.num_classes 会被填充为 背景+N，有助于自动构建模型。
     """
-    data = CoCo2017DataLoader(cfg, task="det")  # ← 走你的新封装                    :contentReference[oaicite:7]{index=7}
+    data = CoCo2017DataLoader(cfg, task="det")
     train_loader, val_loader = data.getTrainValDataloader()
     num_classes = data.num_classes if data.num_classes is not None else int(cfg.get("num_classes", 81))
     return train_loader, val_loader, num_classes
@@ -95,120 +92,55 @@ def cmd_train(cfg: Dict[str, Any]):
     set_seed(cfg.get("random_seed", 42))
     ensure_dir(cfg["save_dir"])
 
-    device = torch.device("cuda" if (cfg.get("GPU_ID", "") != "" and torch.cuda.is_available()) else "cpu")
-
+    # dataloader / model
     train_loader, val_loader, num_classes = build_data(cfg)
-    model = build_model(cfg, num_classes).to(device)
-    criterion = SSDLoss(num_classes=num_classes, alpha=float(cfg.get("ssd_alpha", 1.0)))
+    model = build_model(cfg, num_classes)
 
-    # optimizer / scheduler（与现有 DetTask 保持一致的风格）                    :contentReference[oaicite:8]{index=8}
-    opt_name = cfg.get("optimizer", "Adam")
-    if opt_name == "Adam":
-        optimizer = torch.optim.Adam(model.parameters(), lr=float(cfg.get("learning_rate", 3.5e-4)),
-                                     weight_decay=float(cfg.get("weight_decay", 1e-4)))
-    elif opt_name == "SGD":
-        optimizer = torch.optim.SGD(model.parameters(), lr=float(cfg.get("learning_rate", 1e-3)),
-                                    momentum=0.9, weight_decay=float(cfg.get("weight_decay", 1e-4)))
+    # Task（使用已有 DetTask）
+    task = DetTask(cfg, model, num_classes=num_classes)
+
+    # 如果存在历史权重则加载继续训练
+    for cand_name in ("best.pt", "last.pt"):
+        cand = Path(cfg["save_dir"]) / cand_name
+        if cand.exists():
+            sd = torch.load(str(cand), map_location="cpu")
+            if isinstance(sd, dict) and "model" in sd:
+                model.load_state_dict(sd["model"])
+            else:
+                model.load_state_dict(sd)
+            print(f"[INFO] Loaded checkpoint: {cand}")
+            break
+
+    # 开始训练
+    task.train(train_loader, val_loader)
+
+def cmd_eval(cfg: Dict[str, Any], weights: str | None):
+    core.init(cfg)
+    set_seed(cfg.get("random_seed", 42))
+
+    # dataloader / model
+    train_loader, val_loader, num_classes = build_data(cfg)
+    model = build_model(cfg, num_classes)
+
+    # 选择权重：--weights > best.pt > last.pt
+    if not weights:
+        for cand in (Path(cfg["save_dir"]) / "best.pt", Path(cfg["save_dir"]) / "last.pt"):
+            if cand.exists():
+                weights = str(cand); break
+    if not weights:
+        raise FileNotFoundError("未找到可用权重，请用 --weights 指定，或先训练得到 best.pt/last.pt。")
+
+    # 兼容两种保存格式（带 'model' 的 ckpt 或纯 state_dict）
+    sd = torch.load(weights, map_location="cpu")
+    if isinstance(sd, dict) and "model" in sd:
+        model.load_state_dict(sd["model"])
     else:
-        raise ValueError(opt_name)
+        model.load_state_dict(sd)
+    print(f"[INFO] loaded weights: {weights}")
 
-    sch_name = cfg.get("scheduler", "MultiStepLR-90,130-0.2")
-    if "MultiStepLR" in sch_name:
-        milestones = [int(x) for x in sch_name.strip().split('-')[1].split(',')]
-        gamma = float(sch_name.strip().split('-')[2])
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
-    elif "step" in sch_name:
-        step_size = int(sch_name.strip().split('-')[1]); gamma = float(sch_name.strip().split('-')[2])
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
-    else:
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5,
-                                                               patience=5, min_lr=1e-6)
-
-    best_proxy = -1e9
-    epochs = int(cfg.get("epochs", 100))
-    log_interval = int(cfg.get("log_interval", 20))
-    grad_clip = float(cfg.get("clip_gradient", 0.0))
-
-    for ep in range(epochs):
-        model.train()
-        run_loss = 0.0
-
-        for it, (imgs, targets) in enumerate(train_loader):
-            imgs = imgs.to(device)
-            t_boxes = [t["boxes"].to(device) for t in targets]
-            t_labels= [t["labels"].to(device) for t in targets]
-            batch_targets = {"boxes": t_boxes, "labels": t_labels}
-
-            out = model(imgs)  # {"cls_logits","bbox_regs","anchors"}
-            loss, meter = criterion(out["cls_logits"], out["bbox_regs"], out["anchors"], batch_targets)
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
-
-            run_loss += float(loss.item())
-            if it % log_interval == 0:
-                print(f"\r[Train] ep {ep+1}/{epochs} it {it}/{len(train_loader)} "
-                      f"loss {loss.item():.4f} (cls {meter['loss_cls']:.3f} reg {meter['loss_reg']:.3f}) "
-                      f"pos {meter['pos']}", end='', flush=True)
-        print()
-
-        # 简化版验证：用 val loss 作为 proxy（越小越好 -> 记 best 的负数）
-        val_loss = _validate(model, val_loader, criterion, device)
-        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(-val_loss)
-        else:
-            scheduler.step()
-
-        # 保存
-        last = os.path.join(cfg["save_dir"], "last.pt")
-        torch.save(model.state_dict(), last)
-        if -val_loss > best_proxy:
-            best_proxy = -val_loss
-            best = os.path.join(cfg["save_dir"], "best.pt")
-            torch.save(model.state_dict(), best)
-            print(f"[INFO] new best (proxy) -> {best}")
-
-    print("[OK] Training finished.")
-
-def _forward_raw(model, x):
-    """
-    兼容两种返回：eval 下若返回 list（已后处理的检测结果），
-    则临时切到 train 模式拿原始 dict（cls_logits/bbox_regs/anchors）。
-    """
-    y = model(x)
-    if isinstance(y, dict):
-        return y
-    prev = model.training
-    model.train(True)
-    y = model(x)
-    model.train(prev)
-    if isinstance(y, dict):
-        return y
-    raise RuntimeError("Model did not return raw dict in either eval or train mode.")
-
-@torch.no_grad()
-def _validate(model, val_loader, criterion, device):
-    was_training = model.training
-    model.eval()
-    tot, n = 0.0, 0
-    for imgs, targets in val_loader:
-        imgs = imgs.to(device)
-        t_boxes = [t["boxes"].to(device) for t in targets]
-        t_labels= [t["labels"].to(device) for t in targets]
-        batch_targets = {"boxes": t_boxes, "labels": t_labels}
-
-        out = _forward_raw(model, imgs)
-        loss, meter = criterion(out["cls_logits"], out["bbox_regs"], out["anchors"], batch_targets)
-        tot += float(loss.item()); n += 1
-    if was_training:
-        model.train(True)
-    avg = tot / max(1, n)
-    print(f"[Val] loss {avg:.4f}")
-    return avg
-
+    # DetTask 验证（返回平均 loss）
+    task = DetTask(cfg, model, num_classes=num_classes)
+    _ = task.onValidation(val_loader, epoch=0, epochs=1)
 
 # -------------------------
 # predict (folder)
@@ -221,7 +153,7 @@ def cmd_predict(cfg: Dict[str, Any], images_dir: str, out_dir: str, weights: str
     device = torch.device("cuda" if (cfg.get("GPU_ID", "") != "" and torch.cuda.is_available()) else "cpu")
 
     # 用验证集的类别数构建模型（或 fallback）
-    _, val_loader, num_classes = build_data(cfg)
+    _, _, num_classes = build_data(cfg)
     model = build_model(cfg, num_classes).to(device).eval()
 
     # 自动找权重
@@ -231,7 +163,12 @@ def cmd_predict(cfg: Dict[str, Any], images_dir: str, out_dir: str, weights: str
                 weights = str(cand); break
     if not weights:
         raise FileNotFoundError("未找到权重，请用 --weights 指定，或先训练得到 best.pt/last.pt。")
-    model.load_state_dict(torch.load(weights, map_location=device))
+
+    sd = torch.load(weights, map_location=device)
+    if isinstance(sd, dict) and "model" in sd:
+        model.load_state_dict(sd["model"])
+    else:
+        model.load_state_dict(sd)
     print(f"[INFO] loaded weights: {weights}")
 
     img_size = int(cfg.get("img_size", 256))
@@ -243,8 +180,8 @@ def cmd_predict(cfg: Dict[str, Any], images_dir: str, out_dir: str, weights: str
         raise FileNotFoundError(f"未在 {images_dir} 找到图片")
 
     for p in files:
-        bgr = cv2.imread(p); 
-        if bgr is None: 
+        bgr = cv2.imread(p)
+        if bgr is None:
             continue
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
@@ -253,12 +190,9 @@ def cmd_predict(cfg: Dict[str, Any], images_dir: str, out_dir: str, weights: str
         x = torch.from_numpy(img_lb.transpose(2,0,1)).float().unsqueeze(0) / 255.0
         x = x.to(device)
 
-        outs = model(x)  # 推理：List[dict] or 已拼接后处理（见你的实现）        :contentReference[oaicite:9]{index=9}
-        # 兼容两种返回：训练 dict / 推理 list
+        outs = model(x)  # 推理：List[dict]（SSDLiteDet 在 eval 返回 list）
         if isinstance(outs, dict):
-            # 若模型在 eval 仍返回 dict，这里给一个极简的“最高类概率 + 解码 + NMS”的兜底
-            boxes, scores, labels = _quick_decode_for_vis(outs, img_size, img_size)
-            det = {"boxes": boxes, "scores": scores, "labels": labels}
+            det = _quick_decode_for_vis(outs, img_size, img_size)
         else:
             det = outs[0]
 
@@ -285,7 +219,9 @@ def _quick_decode_for_vis(out: Dict[str, torch.Tensor], W: int, H: int, score_th
 
     scores, labels = cls.max(dim=1)                           # background 仍在内
     keep = scores > score_th
-    return boxes[keep].detach().cpu().numpy(), scores[keep].detach().cpu().numpy(), labels[keep].detach().cpu().numpy()
+    return {"boxes": boxes[keep].detach().cpu().numpy(),
+            "scores": scores[keep].detach().cpu().numpy(),
+            "labels": labels[keep].detach().cpu().numpy()}
 
 def _draw_dets(img_rgb: np.ndarray, det: Dict[str, np.ndarray]):
     boxes = det["boxes"]; scores = det["scores"]; labels = det["labels"]
@@ -326,7 +262,12 @@ def cmd_export_onnx(cfg: Dict[str, Any], weights: str | None, out_path: str, ops
                 weights = str(cand); break
     if not weights:
         raise FileNotFoundError("未找到可用权重，请通过 --weights 指定，或先训练得到 best.pt/last.pt。")
-    model.load_state_dict(torch.load(weights, map_location=device))
+
+    sd = torch.load(weights, map_location=device)
+    if isinstance(sd, dict) and "model" in sd:
+        model.load_state_dict(sd["model"])
+    else:
+        model.load_state_dict(sd)
 
     # dummy
     h = w = int(cfg.get("img_size", 256))
@@ -404,7 +345,7 @@ def build_parser():
     )
 
     # 通用覆盖
-    p.add_argument("--config", type=str, default="config.json", help="JSON 配置")
+    p.add_argument("--config", type=str, default="configs/ssdlite_config.json", help="JSON 配置")
     p.add_argument("--save-dir", type=str, help="覆盖 cfg.save_dir")
     p.add_argument("--img-size", type=int, help="覆盖 cfg.img_size")
     p.add_argument("--num-classes", type=int, help="覆盖 cfg.num_classes（如未从数据自动获取时）")
@@ -455,7 +396,7 @@ def main():
         raise FileNotFoundError(f"未找到配置文件：{args.config}")
     base_cfg = load_json(args.config)
 
-    # 命令行覆盖项（与 movenet_cli 对齐）                               # :contentReference[oaicite:10]{index=10}
+    # 命令行覆盖项（与 movenet_cli 对齐）
     override = {
         "save_dir": args.save_dir,
         "img_size": args.img_size,
@@ -479,25 +420,10 @@ def main():
     if args.cmd == "train":
         cmd_train(cfg)
     elif args.cmd == "eval":
-        # 直接复用验证函数
-        core.init(cfg)
-        set_seed(cfg.get("random_seed", 42))
-        device = torch.device("cuda" if (cfg.get("GPU_ID", "") != "" and torch.cuda.is_available()) else "cpu")
-        train_loader, val_loader, num_classes = build_data(cfg)
-        model = build_model(cfg, num_classes).to(device)
-        # 权重选择
-        weights = getattr(args, "weights", None)
-        if not weights:
-            for cand in (Path(cfg["save_dir"]) / "best.pt", Path(cfg["save_dir"]) / "last.pt"):
-                if cand.exists():
-                    weights = str(cand); break
-        if not weights:
-            raise FileNotFoundError("未找到可用权重，请通过 --weights 指定，或先训练得到 best.pt/last.pt。")
-        model.load_state_dict(torch.load(weights, map_location=device))
-        criterion = SSDLoss(num_classes=num_classes, alpha=float(cfg.get("ssd_alpha", 1.0)))
-        _ = _validate(model, val_loader, criterion, device)
+        cmd_eval(cfg, weights=getattr(args, "weights", None))
     elif args.cmd == "predict":
-        cmd_predict(cfg, images_dir=args.images, out_dir=args.out, weights=getattr(args, "weights", None))
+        cmd_predict(cfg, images_dir=args.images, out_dir=args.out,
+                    weights=getattr(args, "weights", None))
     elif args.cmd == "export-onnx":
         cmd_export_onnx(cfg,
                         weights=getattr(args, "weights", None),
