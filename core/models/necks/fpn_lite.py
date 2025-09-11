@@ -1,12 +1,6 @@
 import torch.nn as nn
+from core.models import conv_utils
 
-
-def conv1x1(c_in, c_out): return nn.Sequential(nn.Conv2d(c_in, c_out, 1, 1, 0, bias=False),
-                                               nn.BatchNorm2d(c_out),
-                                               nn.ReLU(inplace=True))
-def conv3x3(c_in, c_out): return nn.Sequential(nn.Conv2d(c_in, c_out, 3, 1, 1, bias=False),
-                                               nn.BatchNorm2d(c_out),
-                                               nn.ReLU(inplace=True))
 
 class FPNLite(nn.Module):
     """
@@ -14,15 +8,15 @@ class FPNLite(nn.Module):
     """
     def __init__(self, c3, c4, c5, outc=64):
         super().__init__()
-        self.l3 = conv1x1(c3, outc)
-        self.l4 = conv1x1(c4, outc)
-        self.l5 = conv1x1(c5, outc)
-        self.smooth3 = conv3x3(outc, outc)
-        self.smooth4 = conv3x3(outc, outc)
+        self.l3 = conv_utils.conv1x1(c3, outc)
+        self.l4 = conv_utils.conv1x1(c4, outc)
+        self.l5 = conv_utils.conv1x1(c5, outc)
+        self.smooth3 = conv_utils.conv3x3(outc, outc)
+        self.smooth4 = conv_utils.conv3x3(outc, outc)
         
         # --- 新增代码 ---
         # 增加一个最终的平滑层，用于上采样后的特征图
-        self.final_smooth = conv3x3(outc, outc)
+        self.final_smooth = conv_utils.conv3x3(outc, outc)
         # --- 新增代码结束 ---
 
     def forward(self, c3, c4, c5):

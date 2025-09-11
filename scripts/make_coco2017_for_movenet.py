@@ -191,7 +191,7 @@ def collect_single_person_candidates(root: Path, split: str, min_visible_kpts: i
         raise ValueError("No 'person' category found in categories.")
 
     kept: List[ImgRec] = []
-    skipped_multi = 0
+    # skipped_multi = 0
     skipped_kpt = 0
 
     for img in images:
@@ -201,27 +201,30 @@ def collect_single_person_candidates(root: Path, split: str, min_visible_kpts: i
 
         all_anns = anns_by_img.get(img_id, [])
         person_anns = [a for a in all_anns if int(a.get("category_id")) == int(person_cat_id) and int(a.get("iscrowd", 0)) == 0]
-        if len(person_anns) != 1:
-            skipped_multi += 1
+
+        # 如果图中没有非crowd的人，则跳过
+        if not person_anns:
             continue
 
-        ann = person_anns[0]
-        kpts = ann.get("keypoints", [])
-        if visible_kpt_count(kpts) < min_visible_kpts:
-            skipped_kpt += 1
-            continue
+        # 遍历图中的每一个人，为他们分别创建样本
+        for ann in person_anns:
+            kpts = ann.get("keypoints", [])
+            if visible_kpt_count(kpts) < min_visible_kpts:
+                skipped_kpt += 1
+                continue
+            # end-if
 
-        bbox = ann["bbox"]
-        u_x, u_y, u_w, u_h = union_bbox_with_visible_kpts(bbox, kpts)
-        crop_x0, crop_y0, side = square_crop_from_box((u_x, u_y, u_w, u_h), expand_ratio)
+            bbox = ann["bbox"]
+            u_x, u_y, u_w, u_h = union_bbox_with_visible_kpts(bbox, kpts)
+            crop_x0, crop_y0, side = square_crop_from_box((u_x, u_y, u_w, u_h), expand_ratio)
 
-        kept.append(ImgRec(
-            split=split, file_name=file_name, width=width, height=height,
-            ann=ann, crop_x0=crop_x0, crop_y0=crop_y0, crop_side=side
-        ))
+            kept.append(ImgRec(
+                split=split, file_name=file_name, width=width, height=height,
+                ann=ann, crop_x0=crop_x0, crop_y0=crop_y0, crop_side=side
+            ))
 
     if verbose:
-        print(f"[collect:{split}] candidates={len(kept)} (skipped_multi={skipped_multi}, skipped_kpt={skipped_kpt})")
+        print(f"[collect:{split}] candidates={len(kept)} (skipped_kpt={skipped_kpt})")
     return {
         "coco_info": dict(info=info, licenses=licenses, categories=categories),
         "img_dir": img_dir,

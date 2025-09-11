@@ -80,8 +80,21 @@ class CocoKeypointsDataset(Dataset):
         for a in anns_all:
             imgid_to_anns.setdefault(a["image_id"], []).append(a)
 
-        # 仅保留至少有一个 annotation 的图像；路径统一为“绝对路径”
-        self.items: List[Tuple[str, List[Dict[str, Any]]]] = []
+        # # 仅保留至少有一个 annotation 的图像；路径统一为“绝对路径”
+        # self.items: List[Tuple[str, List[Dict[str, Any]]]] = []
+        # for img_id, anns in imgid_to_anns.items():
+        #     info = self.imgid_to_info.get(img_id)
+        #     if not info:
+        #         continue
+        #     file_name = info.get("file_name")
+        #     if not file_name:
+        #         continue
+        #     img_path = os.path.abspath(os.path.join(self.img_root, file_name))
+        #     if os.path.isfile(img_path):
+        #         self.items.append((img_path, anns))
+
+        # 为图中的每一个人都创建一个独立的样本
+        self.items: List[Tuple[str, Dict[str, Any]]] = []
         for img_id, anns in imgid_to_anns.items():
             info = self.imgid_to_info.get(img_id)
             if not info:
@@ -91,7 +104,10 @@ class CocoKeypointsDataset(Dataset):
                 continue
             img_path = os.path.abspath(os.path.join(self.img_root, file_name))
             if os.path.isfile(img_path):
-                self.items.append((img_path, anns))
+                # --- 核心修改：遍历这张图里的每一个人 ---
+                for person_ann in anns:
+                    # 将 (图片路径, 单个person的标注) 作为一条数据添加到 self.items
+                    self.items.append((img_path, person_ann))
 
         if not self.items:
             raise FileNotFoundError(f"No images found via annotations under: {self.img_root}")
@@ -212,28 +228,39 @@ class CocoKeypointsDataset(Dataset):
         return heatmaps, centers, regs, offsets, kps_mask
 
     def __getitem__(self, idx: int):
-        img_path, anns = self.items[idx]
+        # img_path, anns = self.items[idx]
+        # img = cv2.imread(img_path)
+        # assert img is not None, f"fail to read image: {img_path}"
+        # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        #
+        # # —— 选择一个 person 做“中心”的回归锚（其 keypoints 参与 regs/offset 的中心采样）——
+        # if len(anns) == 1:
+        #     person = anns[0]
+        # else:
+        #     if self.select_person == "largest":
+        #         person = max(anns, key=lambda a: bbox_area(a.get("bbox", [0, 0, 0, 0])))
+        #     else:
+        #         person = anns[np.random.randint(0, len(anns))]
+        #
+        # # 取该人的 keypoints（17*3: x,y,v）
+        # kp = np.array(person["keypoints"], dtype=np.float32).reshape(-1, 3)  # [17,3], 原图坐标
+
+        # --- 核心修改：直接获取图片路径和单个person的标注 ---
+        img_path, person = self.items[idx]  # <-- person 现在是单个标注字典
         img = cv2.imread(img_path)
         assert img is not None, f"fail to read image: {img_path}"
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # —— 选择一个 person 做“中心”的回归锚（其 keypoints 参与 regs/offset 的中心采样）——
-        if len(anns) == 1:
-            person = anns[0]
-        else:
-            if self.select_person == "largest":
-                person = max(anns, key=lambda a: bbox_area(a.get("bbox", [0, 0, 0, 0])))
-            else:
-                person = anns[np.random.randint(0, len(anns))]
+        # --- 移除整个 "选择一个 person" 的逻辑块 ---
 
-        # 取该人的 keypoints（17*3: x,y,v）
+        # 直接使用传入的 person 的 keypoints
         kp = np.array(person["keypoints"], dtype=np.float32).reshape(-1, 3)  # [17,3], 原图坐标
 
         # 可选：把所有人 heatmap 叠加（常见做法增强监督），但中心 & regs/offset 只用被选的人
         all_kps = [kp]
-        for a in anns:
-            if a is not person:
-                all_kps.append(np.array(a["keypoints"], dtype=np.float32).reshape(-1, 3))
+        # for a in anns:
+        #     if a is not person:
+        #         all_kps.append(np.array(a["keypoints"], dtype=np.float32).reshape(-1, 3))
 
         # —— 先做几何增广（原图坐标系）——
         if self.is_train:

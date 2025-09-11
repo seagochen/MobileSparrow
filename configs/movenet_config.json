@@ -12,10 +12,10 @@
   "save_dir": "output/movenet",
   "dataset_root_path": "./data/coco2017_movenet_sp",
 
-  "backbone": "mobilenet_v2",
-  "width_mult": 1.4,
-  "neck_outc": 64,
-  "head_midc": 32,
+  "backbone": "shufflenet_v2",
+  "width_mult": 1.5,
+  "neck_outc": 96,
+  "head_midc": 48,
 
   "img_size": 192,
   "target_stride": 4,
