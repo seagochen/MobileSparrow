@@ -4,6 +4,7 @@ import os
 from typing import Dict, Tuple
 
 import torch
+from torch import optim
 import torch.nn as nn
 from torch.amp import autocast, GradScaler
 
@@ -27,7 +28,18 @@ class BaseTrainer:
                  device: torch.device,
                  # 优化器与调度器参数
                  optimizer_cfg: Dict,
-                 scheduler_cfg: Dict,
+                # —— 学习率调度器改为明参 —— 
+                 scheduler_name: str,
+                 milestones=None,
+                 gamma: float = 0.1,
+                 step_size: int = 30,
+                 mode: str = "max",
+                 factor: float = 0.5,
+                 patience: int = 5,
+                 min_lr: float = 1e-6,
+                 T_0: int = 10,
+                 T_mult: int = 1,
+                 last_epoch: int = -1,
                  # 训练技巧参数
                  use_amp: bool = True,
                  use_ema: bool = True,
@@ -53,7 +65,13 @@ class BaseTrainer:
         self.optimizer = common.select_optimizer(
             optimizer_cfg['name'], self.model, optimizer_cfg['lr'], optimizer_cfg['weight_decay']
         )
-        self.scheduler = common.select_scheduler(scheduler_cfg['name'], self.optimizer)
+        # 明参构建调度器（不再接受 dict / 字符串）
+        self.scheduler = common.build_scheduler(
+            scheduler_name, self.optimizer,
+            milestones=milestones, gamma=gamma, step_size=step_size,
+            mode=mode, factor=factor, patience=patience, min_lr=min_lr,
+            T_0=T_0, T_mult=T_mult, last_epoch=last_epoch
+        )
 
         # --- 状态记录 ---
         os.makedirs(self.save_dir, exist_ok=True)
@@ -74,7 +92,13 @@ class BaseTrainer:
 
             # 更新学习率和保存模型
             main_metric = self._get_main_metric(val_meters)
-            self.scheduler.step(main_metric)
+
+            # 只有 ReduceLROnPlateau 需要 metric，其它直接 step()
+            if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                self.scheduler.step(main_metric)
+            else:
+                self.scheduler.step()
+
             self._save_checkpoints(main_metric, epoch)
 
         self._on_train_end()

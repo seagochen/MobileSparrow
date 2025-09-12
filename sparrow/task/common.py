@@ -8,28 +8,48 @@ from torch import optim
 # =========================
 # Schedulers / Optimizers
 # =========================
-def select_scheduler(scheduler: str, optimizer):
-    if 'default' in scheduler:
-        factor = float(scheduler.strip().split('-')[1])
-        patience = int(scheduler.strip().split('-')[2])
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=factor, patience=patience, min_lr=1e-6
+def build_scheduler(
+    name: str,
+    optimizer,
+    *,
+    # 仅在对应调度器下会用到的明参：
+    milestones=None,
+    gamma: float = 0.1,
+    step_size: int = 30,
+    mode: str = "max",
+    factor: float = 0.5,
+    patience: int = 5,
+    min_lr: float = 1e-6,
+    T_0: int = 10,
+    T_mult: int = 1,
+    last_epoch: int = -1,
+):
+    n = (name or "").lower()
+
+    if n in ("multisteplr", "multi_step", "multi-step"):
+        if milestones is None:
+            raise ValueError("MultiStepLR 需要提供 milestones=list[int]")
+        return optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=list(milestones), gamma=float(gamma), last_epoch=int(last_epoch)
         )
-    elif 'step' in scheduler:
-        step_size = int(scheduler.strip().split('-')[1])
-        gamma = float(scheduler.strip().split('-')[2])
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma, last_epoch=-1)
-    elif 'SGDR' in scheduler:
-        T_0 = int(scheduler.strip().split('-')[1])
-        T_mult = int(scheduler.strip().split('-')[2])
-        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=T_0, T_mult=T_mult)
-    elif 'MultiStepLR' in scheduler:
-        milestones = [int(x) for x in scheduler.strip().split('-')[1].split(',')]
-        gamma = float(scheduler.strip().split('-')[2])
-        scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
-    else:
-        raise Exception("Unknown scheduler.")
-    return scheduler
+
+    if n in ("steplr", "step"):
+        return optim.lr_scheduler.StepLR(
+            optimizer, step_size=int(step_size), gamma=float(gamma), last_epoch=int(last_epoch)
+        )
+
+    if n in ("cosineannealingwarmrestarts", "sgdr"):
+        return optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=int(T_0), T_mult=int(T_mult)
+        )
+
+    if n in ("reducelronplateau", "plateau", "default"):
+        return optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode=str(mode), factor=float(factor),
+            patience=int(patience), min_lr=float(min_lr)
+        )
+
+    raise ValueError(f"Unknown scheduler name: {name!r}")
 
 
 def select_optimizer(optims: str, model, learning_rate: float, weight_decay: float):

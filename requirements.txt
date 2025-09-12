@@ -13,3 +13,4 @@ kaggle
 onnx
 nvitop
 pycocotools
+pyyaml
