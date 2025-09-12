@@ -158,7 +158,7 @@ def load_model_pt(
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {str(path)}")
 
-    ckpt = torch.load(path, map_location=map_location)
+    ckpt = torch.load(path, map_location=map_location, weights_only=False)
     meta = {"epoch": None, "extra": {}, "torch_version": None}
 
     if isinstance(ckpt, dict):
