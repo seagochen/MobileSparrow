@@ -5,15 +5,9 @@ sparrow_cli.py
 Generic, YAML-driven CLI for training, evaluation, and export.
 
 What's new in this revision:
-- Robust .pt loading for both train/eval (resume if allowed; fallbacks if not specified).
-- Standardized checkpoint saving: always writes last.pt; tries to produce best.pt.
-- Fixed aliases to match repository layout.
-- Optional reproducibility utilities (seed & deterministic mode).
-
-Usage:
-  python sparrow_cli.py train  -c configs/movenet.yaml
-  python sparrow_cli.py eval   -c configs/movenet.yaml --set weights=outputs/mn/best.pt
-  python sparrow_cli.py export -c configs/movenet.yaml --set export.output=out/mn.onnx
+- CLI: top-level --help now prints all subcommand options.
+- Train: --continue (resume) & --weights to load checkpoint and continue training (with optimizer state).
+- Export: robust wrapper instantiation that filters unsupported kwargs (fixes unexpected kwarg errors).
 """
 
 import argparse
@@ -21,9 +15,11 @@ import importlib
 import importlib.util
 import os
 import sys
+import textwrap
 import types
 import shutil
 import random
+import inspect  # NEW: for filtering wrapper kwargs
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Callable, Optional, Union
 
@@ -371,6 +367,40 @@ def maybe_instantiate(target: Any, kwargs: Dict[str, Any]) -> Any:
     return target
 
 
+# NEW: filtered instantiation to avoid unexpected-kwarg TypeError in wrappers
+def instantiate_with_filtered_kwargs(target: Any, kwargs: Dict[str, Any]) -> Any:
+    """
+    Instantiate/call `target` but only pass kwargs that its signature accepts.
+    Unknown kwargs will be ignored (and, if possible, set as attributes afterwards).
+    """
+    def _filter(sig, kw):
+        params = sig.parameters
+        if any(p.kind == p.VAR_KEYWORD for p in params.values()):
+            return kw  # target accepts **kwargs
+        allowed = {k for k in params.keys() if k != "self"}
+        return {k: v for k, v in kw.items() if k in allowed}
+
+    if isinstance(target, type):
+        sig = inspect.signature(target.__init__)
+        fkw = _filter(sig, kwargs)
+        obj = target(**fkw)
+        # Best effort: set leftover as attributes if they exist
+        for k, v in kwargs.items():
+            if k not in fkw and hasattr(obj, k):
+                try:
+                    setattr(obj, k, v)
+                except Exception:
+                    pass
+        return obj
+
+    if callable(target):
+        sig = inspect.signature(target)
+        fkw = _filter(sig, kwargs)
+        return target(**fkw)
+
+    return target
+
+
 # -----------------------------
 # Builders
 # -----------------------------
@@ -578,7 +608,8 @@ def cmd_export(cfg: Dict[str, Any]):
     if wrapper_cfg:
         wrap_cls = resolve_callable(wrapper_cfg["class"])
         wrap_args = wrapper_cfg.get("args", {}) or {}
-        model = maybe_instantiate(wrap_cls, {"movenet": model, **wrap_args})
+        # FIX: filter unsupported kwargs to avoid DummyMoveNet unexpected kwarg
+        model = instantiate_with_filtered_kwargs(wrap_cls, {"movenet": model, **wrap_args})
 
     model.eval()
 
@@ -618,21 +649,127 @@ def cmd_export(cfg: Dict[str, Any]):
 # CLI parser
 # -----------------------------
 
+def _parse_shape_arg(s: str) -> List[int]:
+    """Parse input shape from '1,3,192,192' or '[1,3,192,192]'."""
+    s = s.strip().strip("[]")
+    parts = [p for p in s.replace(" ", "").split(",") if p]
+    return [int(p) for p in parts]
+
 def build_argparser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="sparrow_cli",
-                                description="Generic YAML-driven CLI for Sparrow models.")
+    # Use a formatter that prints defaults and keeps our manual epilog readable
+    class RichHelpFormatter(argparse.RawTextHelpFormatter,
+                            argparse.ArgumentDefaultsHelpFormatter):
+        pass
+    
+    p = argparse.ArgumentParser(
+        prog="sparrow_cli",
+        description="Generic YAML-driven CLI for Sparrow models.",
+        formatter_class=RichHelpFormatter
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
+    # Common options (shared)
     def add_common(sp: argparse.ArgumentParser):
         sp.add_argument("--config", "-c", type=str, required=True, help="Path to YAML config file")
         sp.add_argument("--set", "-s", action="append", default=[],
                         help="Override config with key=value (dot notation), e.g., --set trainer.args.epochs=10")
 
-    add_common(sub.add_parser("train", help="Run training"))
-    add_common(sub.add_parser("eval",  help="Run evaluation on validation set"))
-    add_common(sub.add_parser("export", help="Export model to ONNX/TorchScript"))
+    # -------- train --------
+    sp_train = sub.add_parser("train", help="Run training",
+                              formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    add_common(sp_train)
+    # NEW: convenience flags for resume/weights/seed/deterministic/save_dir
+    sp_train.add_argument("--continue", dest="continue_train", action="store_true",
+                          help="Continue training from checkpoint (loads optimizer state if available)")
+    sp_train.add_argument("--weights", type=str, default=None,
+                          help="Path to weights/checkpoint (.pt) to load before training")
+    sp_train.add_argument("--seed", type=int, default=None, help="Global random seed")
+    sp_train.add_argument("--deterministic", action="store_true", help="Use deterministic (slower) training")
+    sp_train.add_argument("--save-dir", type=str, default=None, help="Override trainer.args.save_dir in YAML")
 
+    # -------- eval --------
+    sp_eval = sub.add_parser("eval", help="Run evaluation on validation set",
+                             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    add_common(sp_eval)
+    sp_eval.add_argument("--weights", type=str, default=None, help="Path to weights (.pt)")
+
+    # -------- export --------
+    sp_export = sub.add_parser("export", help="Export model to ONNX/TorchScript",
+                               formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    add_common(sp_export)
+    sp_export.add_argument("--weights", type=str, default=None, help="Path to weights (.pt)")
+    sp_export.add_argument("--output", type=str, default=None, help="Output file path for exported model")
+    sp_export.add_argument("--format", type=str, default=None, choices=("onnx", "torchscript", "ts"),
+                           help="Export format")
+    sp_export.add_argument("--opset", type=int, default=None, help="ONNX opset version (when --format onnx)")
+    sp_export.add_argument("--input-shape", type=str, default=None,
+                           help="Input shape like 1,3,192,192 (overrides export.input.shape in YAML)")
+    sp_export.add_argument("--half", action="store_true", help="Export model in half precision where supported")
+    sp_export.add_argument("--dynamic-batch", action="store_true",
+                           help="Enable dynamic batch dimension for ONNX export")
+
+    # --- Make top-level --help show all subcommand options ---
+    # epilog：用显式换行 + 缩进，避免被 formatter 重新折行成一整段
+    p.epilog = "\n".join([
+        "Examples:",
+        "  python sparrow_cli.py train  -c configs/movenet.yaml --continue --weights outputs/mn/last.pt",
+        "  python sparrow_cli.py eval   -c configs/movenet.yaml --weights outputs/mn/best.pt",
+        "  python sparrow_cli.py export -c configs/movenet.yaml --output out/mn.onnx --format onnx --opset 13",
+        "",
+        "Subcommand options (overview):",
+        "",
+        "=== train ===",
+        textwrap.indent(sp_train.format_help().rstrip(), "  "),
+        "",
+        "=== eval ===",
+        textwrap.indent(sp_eval.format_help().rstrip(), "  "),
+        "",
+        "=== export ===",
+        textwrap.indent(sp_export.format_help().rstrip(), "  "),
+    ])
     return p
+
+
+def _apply_cli_overrides_to_cfg(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    """Map convenient CLI flags back into YAML cfg structure."""
+    # seed / deterministic (both train & eval paths use)
+    if getattr(args, "seed", None) is not None:
+        cfg["seed"] = int(args.seed)
+    if getattr(args, "deterministic", False):
+        cfg["deterministic"] = True
+
+    if args.command == "train":
+        if getattr(args, "continue_train", False):
+            cfg["resume"] = True  # _derive_resume_path() will fallback to save_dir/last.pt
+        if getattr(args, "weights", None):
+            cfg["weights"] = args.weights
+        if getattr(args, "save_dir", None):
+            # Ensure path lands at trainer.args.save_dir
+            cfg.setdefault("trainer", {}).setdefault("args", {})["save_dir"] = args.save_dir
+
+    elif args.command == "eval":
+        if getattr(args, "weights", None):
+            cfg["weights"] = args.weights
+
+    elif args.command == "export":
+        if getattr(args, "weights", None):
+            cfg["weights"] = args.weights
+        cfg.setdefault("export", {})
+        if getattr(args, "output", None):
+            cfg["export"]["output"] = args.output
+        if getattr(args, "format", None):
+            cfg["export"]["format"] = args.format
+        if getattr(args, "opset", None) is not None:
+            cfg["export"]["opset"] = int(args.opset)
+        if getattr(args, "half", False):
+            cfg["export"]["half"] = True
+        # input shape
+        if getattr(args, "input_shape", None):
+            cfg.setdefault("export", {}).setdefault("input", {})["shape"] = _parse_shape_arg(args.input_shape)
+        # dynamic batch
+        if getattr(args, "dynamic_batch", False):
+            cfg["export"]["dynamic_axes"] = {"input": {0: "batch"}, "output": {0: "batch"}}
+    return cfg
 
 
 def main(argv: Optional[List[str]] = None):
@@ -641,9 +778,12 @@ def main(argv: Optional[List[str]] = None):
 
     cfg = _read_yaml(args.config)
     cfg = apply_overrides(cfg, args.set or [])
+    cfg = _apply_cli_overrides_to_cfg(cfg, args)  # NEW: apply CLI sugar
 
     # Basic validations
     if "model" not in cfg or "trainer" not in cfg:
+        # export 也可能只需要 model；但为了保持一致，这里保留原有校验逻辑
+        # 只在 export 子命令放宽 data 要求（见下）
         raise ValueError("YAML must define 'model' and 'trainer' sections")
     if "data" not in cfg and args.command != "export":
         raise ValueError("YAML must define 'data' section for train/eval")

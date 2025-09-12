@@ -185,11 +185,27 @@ class BaseTrainer:
 
     def _save_checkpoints(self, score: float, epoch: int):
         net_to_save = self.ema.ema if self.ema else self.model
-        torch.save(net_to_save.state_dict(), os.path.join(self.save_dir, "last.pt"))
+
+        # Create a complete checkpoint dictionary
+        checkpoint = {
+            'model_state': net_to_save.state_dict(),
+            'optimizer_state': self.optimizer.state_dict(),
+            'epoch': epoch,
+            'best_score': self.best_score,  # Store the best score at this point
+        }
+
+        # Save the complete checkpoint for 'last.pt'
+        torch.save(checkpoint, os.path.join(self.save_dir, "last.pt"))
+
+        # Save the best checkpoint if necessary
         if score > self.best_score:
             self.best_score = score
+
+            # Update the best score in the checkpoint for saving to 'best.pt'
+            checkpoint['best_score'] = self.best_score
+
             best_path = os.path.join(self.save_dir, "best.pt")
-            torch.save(net_to_save.state_dict(), best_path)
+            torch.save(checkpoint, best_path)  # Save the same complete checkpoint structure
             logger.warning("SAVING", f"[INFO] New best: main_score={score:.5f} -> saved to {best_path}")
         else:
             logger.warning("SAVING", f"[INFO] Kept best: main_score={self.best_score:.5f} (current {score:.5f})")

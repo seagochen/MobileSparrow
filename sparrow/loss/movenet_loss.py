@@ -116,37 +116,51 @@ class MoveNetLoss(nn.Module):
         return self._l1_loss(pred_vectors, gt_vectors, mask)
 
     def _compute_offset_loss(self, pred_offsets, gt_offsets, center_x, center_y, gt_regs, kps_mask) -> torch.Tensor:
-        """ 计算偏移量损失 (向量化版本) """
+        """
+        计算偏移量（offset）损失。
+        pred_offsets / gt_offsets: [B, 2*J, H, W]
+        center_x / center_y:       [B]，每张图人体中心栅格坐标（int）
+        gt_regs:                   [B, 2*J, H, W]，中心到各关节点的粗略位移向量
+        kps_mask:                  [B, J]，有效关节点掩码
+        """
         B, _, H, W = pred_offsets.shape
-        batch_indices = torch.arange(B, device=pred_offsets.device)
+        device = pred_offsets.device
+        dtype = pred_offsets.dtype
 
-        # 1. 计算每个关节点的目标整数坐标 (gt_kps_y, gt_kps_x)
-        # gt_regs_at_center: [B, 2*J]
-        gt_regs_at_center = gt_regs[batch_indices, :, center_y, center_x]
-        gt_vectors = gt_regs_at_center.view(B, self.num_joints, 2)
+        batch_idx = torch.arange(B, device=device)
 
-        # gt_kps_coords: [B, J, 2], 浮点坐标
-        gt_kps_coords = gt_vectors + torch.stack([center_x, center_y], dim=-1).float()
-        
-        # 转换为整数坐标并限制在边界内
-        gt_kps_x_int = torch.clamp(gt_kps_coords[:, :, 0], 0, W - 1).long() # [B, J]
-        gt_kps_y_int = torch.clamp(gt_kps_coords[:, :, 1], 0, H - 1).long() # [B, J]
-        
-        # 2. 在目标整数坐标上提取预测和GT的偏移量
-        # 构造用于 advanced indexing 的索引
-        batch_idx_flat = batch_indices.view(B, 1).expand(-1, self.num_joints) # [B, J]
-        
-        # 提取 x 和 y 的偏移量
-        pred_off_x = pred_offsets.view(B, self.num_joints, 2, H, W)[batch_idx_flat, torch.arange(self.num_joints), 0, gt_kps_y_int, gt_kps_x_int]
-        pred_off_y = pred_offsets.view(B, self.num_joints, 2, H, W)[batch_idx_flat, torch.arange(self.num_joints), 1, gt_kps_y_int, gt_kps_x_int]
-        gt_off_x = gt_offsets.view(B, self.num_joints, 2, H, W)[batch_idx_flat, torch.arange(self.num_joints), 0, gt_kps_y_int, gt_kps_x_int]
-        gt_off_y = gt_offsets.view(B, self.num_joints, 2, H, W)[batch_idx_flat, torch.arange(self.num_joints), 1, gt_kps_y_int, gt_kps_x_int]
-        
-        pred_offsets_gathered = torch.stack([pred_off_x, pred_off_y], dim=-1) # [B, J, 2]
-        gt_offsets_gathered = torch.stack([gt_off_x, gt_off_y], dim=-1) # [B, J, 2]
+        # 1) 取出每张图在中心处的 GT 回归向量并 reshape 到 [B, J, 2]
+        #    高级索引：对 [B, C, H, W] 用 (batch, :, y, x) 逐样本取值，得到 [B, 2*J]
+        gt_regs_at_center = gt_regs[batch_idx, :, center_y, center_x]  # [B, 2*J]
+        gt_vectors = gt_regs_at_center.view(B, self.num_joints, 2)  # [B, J, 2]
 
-        # 3. 计算带掩码的 L1 损失
-        mask = kps_mask.unsqueeze(-1)
+        # 2) 把中心坐标扩展到 [B, 1, 2] 再与向量相加 -> 得到各关节在特征图上的浮点坐标 [B, J, 2]
+        #    这是修复点：原来把 [B, J, 2] + [B, 2] 直接相加会在 J 维发生错误广播。
+        center_xy = torch.stack([center_x, center_y], dim=-1).to(gt_vectors.dtype)  # [B, 2]
+        center_xy = center_xy.unsqueeze(1)  # [B, 1, 2]
+        gt_kps_coords = gt_vectors + center_xy  # [B, J, 2]
+
+        # 3) 转为整数栅格坐标并裁剪到边界
+        gt_kps_x_int = torch.clamp(gt_kps_coords[..., 0], 0, W - 1).long()  # [B, J]
+        gt_kps_y_int = torch.clamp(gt_kps_coords[..., 1], 0, H - 1).long()  # [B, J]
+
+        # 4) 在这些坐标处采样预测/GT 的 offset，得到 [B, J, 2]
+        batch_idx_flat = batch_idx.view(B, 1).expand(-1, self.num_joints)  # [B, J]
+        joint_idx = torch.arange(self.num_joints, device=device).view(1, -1).expand(B, -1)
+
+        p4 = pred_offsets.view(B, self.num_joints, 2, H, W)
+        g4 = gt_offsets.view(B, self.num_joints, 2, H, W)
+
+        pred_off_x = p4[batch_idx_flat, joint_idx, 0, gt_kps_y_int, gt_kps_x_int]  # [B, J]
+        pred_off_y = p4[batch_idx_flat, joint_idx, 1, gt_kps_y_int, gt_kps_x_int]  # [B, J]
+        gt_off_x = g4[batch_idx_flat, joint_idx, 0, gt_kps_y_int, gt_kps_x_int]  # [B, J]
+        gt_off_y = g4[batch_idx_flat, joint_idx, 1, gt_kps_y_int, gt_kps_x_int]  # [B, J]
+
+        pred_offsets_gathered = torch.stack([pred_off_x, pred_off_y], dim=-1)  # [B, J, 2]
+        gt_offsets_gathered = torch.stack([gt_off_x, gt_off_y], dim=-1)  # [B, J, 2]
+
+        # 5) 按关节掩码做 L1
+        mask = kps_mask.unsqueeze(-1)  # [B, J, 1]
         return self._l1_loss(pred_offsets_gathered, gt_offsets_gathered, mask)
 
     def _get_max_point(self, heatmap: torch.Tensor, center_weight: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
