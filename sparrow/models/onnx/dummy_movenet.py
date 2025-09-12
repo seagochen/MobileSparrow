@@ -1,4 +1,4 @@
-# core/models/dummy_movenet.py
+# sparrow/models/dummy_movenet.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

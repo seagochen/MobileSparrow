@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
-from core.models import conv_utils
+from sparrow.models import conv_utils
 
 
 class PANetLite(nn.Module):

@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from core.utils.paths import iter_image_paths
+from sparrow.utils.paths import iter_image_paths
 
 
 class SimpleImageFolder(Dataset):

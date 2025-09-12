@@ -4,8 +4,8 @@ from typing import Tuple, Dict
 import torch
 import torch.nn as nn
 
-from core.loss.ssdlite_loss import SSDLoss
-from core.task.base_trainer import BaseTrainer
+from sparrow.loss.ssdlite_loss import SSDLoss
+from sparrow.task.base_trainer import BaseTrainer
 
 
 class DetTrainer(BaseTrainer):

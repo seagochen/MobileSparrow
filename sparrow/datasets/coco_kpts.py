@@ -1,4 +1,4 @@
-# core/datasets/coco_kpts.py
+# sparrow/datasets/coco_kpts.py
 # -*- coding: utf-8 -*-
 import json
 import os
@@ -10,15 +10,23 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from core.datasets.common import (random_affine_points, draw_gaussian,
-                                  apply_hsv, letterbox, get_center_from_kps)
+from sparrow.datasets.common import (random_affine_points, draw_gaussian,
+                                     apply_hsv, letterbox, get_center_from_kps)
 
 
 class CocoKeypointsDataset(Dataset):
     """
-    COCO姿态估计数据集 (内聚版本)。
-    负责加载图像和标注，并应用所有必要的变换。
+    COCO 姿态估计数据集（内聚版）。
+    - 将每个 image 中的每个 person 展开成一条独立样本
+    - 统一完成几何/颜色增广、letterbox、以及 supervision 编码
+    - 输出: (img_tensor [3,H,W], label_tensor [86,Hf,Wf], kps_mask [17], img_path)
     """
+
+    # COCO 17 点左右翻转索引对
+    FLIP_PAIRS = (
+        (1, 2), (3, 4), (5, 6), (7, 8),
+        (9, 10), (11, 12), (13, 14), (15, 16)
+    )
 
     def __init__(self,
                  img_root: str,
@@ -26,10 +34,12 @@ class CocoKeypointsDataset(Dataset):
                  img_size: int,
                  target_stride: int,
                  is_train: bool,
-                 *,  # 强制后面的参数为关键字参数
+                 *,  # 之后强制关键字参数
                  use_dynamic_radius: bool = True,
                  kpt_radius_factor: float = 0.025,
                  ctr_radius_factor: float = 0.035,
+                 gaussian_radius: int = 2,
+                 sigma_scale: float = 1.0,
                  min_radius: int = 1,
                  use_color_aug: bool = True,
                  use_flip: bool = True,
@@ -38,64 +48,85 @@ class CocoKeypointsDataset(Dataset):
                  use_scale: bool = True,
                  scale_range: Tuple[float, float] = (0.75, 1.25)):
         super().__init__()
+
         # --- 核心属性 ---
         self.img_root = os.path.abspath(img_root)
         self.ann_path = ann_path
-        self.img_size = img_size
-        self.stride = target_stride
+        self.img_size = int(img_size)
+        self.stride = int(target_stride)
+        self.is_train = bool(is_train)
+
+        assert self.img_size % self.stride == 0, \
+            f"img_size({self.img_size}) must be divisible by stride({self.stride})"
         self.Hf = self.img_size // self.stride
         self.Wf = self.img_size // self.stride
-        self.is_train = is_train
 
-        # --- 增广和目标生成参数 ---
-        self.use_dynamic_radius = use_dynamic_radius
-        self.kpt_radius_factor = kpt_radius_factor
-        self.ctr_radius_factor = ctr_radius_factor
-        self.min_radius = min_radius
-        self.use_color_aug = use_color_aug
-        self.use_flip = use_flip
-        self.use_rotate = use_rotate
-        self.rotate_deg = rotate_deg
-        self.use_scale = use_scale
+        # --- 增广与监督参数 ---
+        self.use_dynamic_radius = bool(use_dynamic_radius)
+        self.kpt_radius_factor = float(kpt_radius_factor)
+        self.ctr_radius_factor = float(ctr_radius_factor)
+        self.gr = int(gaussian_radius)          # 非动态半径下使用
+        self.sigma_scale = float(sigma_scale)   # 高斯核缩放
+        self.min_radius = int(min_radius)
+
+        self.use_color_aug = bool(use_color_aug)
+        self.use_flip = bool(use_flip)
+        self.use_rotate = bool(use_rotate)
+        self.rotate_deg = float(rotate_deg)
+        self.use_scale = bool(use_scale)
         self.scale_range = scale_range
 
-        # --- 加载和预处理标注 ---
+        # --- 加载与预处理标注 ---
+        self._ann_images: Dict[int, Dict[str, Any]] = {}  # 缓存 images 字段，避免重复 I/O
         self.items = self._load_annotations()
-        self.imgid_to_info = self._get_img_info_dict()
+        self.img_id_to_info = self._get_img_info_dict()  # 如需外部调试可用
 
     def _load_annotations(self) -> List[Tuple[str, Dict[str, Any]]]:
-        # ... (这里粘贴您 coco_kpts.py 中完整的标注加载和处理逻辑) ...
-        # ... (即从 with open(ann_path) 到 for person_ann in anns: self.items.append(...) 的所有代码) ...
         with open(self.ann_path, "r") as f:
             ann_json = json.load(f)
 
-        person_id = next((c["id"] for c in ann_json.get("categories", []) if c.get("name") == "person"), 1)
-        anns_all = [a for a in ann_json["annotations"] if a.get("category_id", person_id) == person_id]
+        images = ann_json.get("images", [])
+        annotations = ann_json.get("annotations", [])
+        categories = ann_json.get("categories", [])
+
+        self._ann_images = {im["id"]: im for im in images}
+
+        # person 类别 id（默认 1）
+        person_id = next((c.get("id") for c in categories if c.get("name") == "person"), 1)
+
+        # 仅保留 person
+        anns_all = [a for a in annotations if a.get("category_id", person_id) == person_id]
         if self.is_train:
+            # 常见清洗：剔除 crowd / 无关键点
             anns_all = [a for a in anns_all if a.get("iscrowd", 0) == 0 and a.get("num_keypoints", 0) > 0]
 
-        imgid_to_info = {im["id"]: im for im in ann_json["images"]}
-        imgid_to_anns = {}
+        # 按 image_id 聚合
+        img_id_to_anns: Dict[int, List[Dict[str, Any]]] = {}
         for a in anns_all:
-            imgid_to_anns.setdefault(a["image_id"], []).append(a)
+            img_id_to_anns.setdefault(a["image_id"], []).append(a)
 
-        items = []
-        for img_id, anns in imgid_to_anns.items():
-            info = imgid_to_info.get(img_id)
-            if info and info.get("file_name"):
-                path = os.path.abspath(os.path.join(self.img_root, info["file_name"]))
-                if os.path.isfile(path):
-                    for person_ann in anns:
-                        items.append((path, person_ann))
+        # 将每个 image 中的每个 person 展开为一条样本
+        items: List[Tuple[str, Dict[str, Any]]] = []
+        for img_id, anns in img_id_to_anns.items():
+            info = self._ann_images.get(img_id)
+            if not info:
+                continue
+            file_name = info.get("file_name")
+            if not file_name:
+                continue
+            path = os.path.abspath(os.path.join(self.img_root, file_name))
+            if not os.path.isfile(path):
+                continue
+            for person_ann in anns:
+                items.append((path, person_ann))
 
         if not items:
             raise FileNotFoundError(f"No valid items found under: {self.img_root} with {self.ann_path}")
         return items
 
     def _get_img_info_dict(self) -> Dict[int, Dict[str, Any]]:
-        with open(self.ann_path, "r") as f:
-            ann_json = json.load(f)
-        return {im["id"]: im for im in ann_json["images"]}
+        # 返回缓存，无需再次读盘
+        return dict(self._ann_images)
 
     def __len__(self):
         return len(self.items)
@@ -103,10 +134,9 @@ class CocoKeypointsDataset(Dataset):
     def _augment_geom(self, img: np.ndarray, kps_xyv: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         在 letterbox 前做随机仿射：缩放、旋转、水平翻转（对 kps 同步仿射）
-        注意：这里的仿射在**原始坐标系**做，后续再 letterbox。
+        注意：仿射在原始坐标系完成，随后再 letterbox。
         """
         h, w = img.shape[:2]
-        M = np.eye(3, dtype=np.float32)
 
         # 随机尺度
         s = 1.0
@@ -118,9 +148,8 @@ class CocoKeypointsDataset(Dataset):
         if self.is_train and self.use_rotate:
             r = np.random.uniform(-self.rotate_deg, self.rotate_deg)
 
-        # 以图像中心为原点构建仿射
+        # 以图像中心为原点构建仿射: 平移->旋转缩放->平移回去
         cx, cy = w * 0.5, h * 0.5
-        # 先平移 -> 旋转 -> 缩放 -> 平移回去
         T1 = np.array([[1, 0, -cx],
                        [0, 1, -cy],
                        [0, 0, 1]], dtype=np.float32)
@@ -131,21 +160,19 @@ class CocoKeypointsDataset(Dataset):
                        [0, 0, 1]], dtype=np.float32)
         M = T2 @ R @ T1  # 3x3
 
-        # 水平翻转
+        # 水平翻转（含关键点左右交换）
         if self.is_train and self.use_flip and (np.random.rand() < 0.5):
             F = np.array([[-1, 0, w],
                           [0, 1, 0],
                           [0, 0, 1]], dtype=np.float32)
             M = F @ M
-
-            # 同时需要对关键点做对称索引交换（COCO 左右翻转），这里给出一对常见映射：
-            flip_pairs = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
-            for a, b in flip_pairs:
+            for a, b in self.FLIP_PAIRS:
                 kps_xyv[[a, b]] = kps_xyv[[b, a]]
 
-        # 应用仿射
-        img = cv2.warpPerspective(img, M, (w, h), flags=cv2.INTER_LINEAR, borderValue=(114, 114, 114))
-        kps_xyv[:, :2] = random_affine_points(kps_xyv[:, :2], M[:2, :])
+        # 应用仿射（2x3）并变换关键点
+        A2 = M[:2, :]  # 2x3
+        img = cv2.warpAffine(img, A2, (w, h), flags=cv2.INTER_LINEAR, borderValue=(114, 114, 114))
+        kps_xyv[:, :2] = random_affine_points(kps_xyv[:, :2], A2)
 
         return img, kps_xyv
 
@@ -159,7 +186,7 @@ class CocoKeypointsDataset(Dataset):
         - center:   [1,Hf,Wf]
         - regs:     [2*17,Hf,Wf]   (仅中心网格位置有效)
         - offsets:  [2*17,Hf,Wf]   (仅各关键点所在网格位置有效)
-        - kps_mask: [17]   (可见=1，不可见=0)
+        - kps_mask: [17]   (可见=1，且点落在特征图内)
         """
         J = 17
         heatmaps = np.zeros((J, self.Hf, self.Wf), dtype=np.float32)
@@ -168,22 +195,22 @@ class CocoKeypointsDataset(Dataset):
         offsets  = np.zeros((2 * J, self.Hf, self.Wf), dtype=np.float32)
         kps_mask = np.zeros((J,), dtype=np.float32)
 
-        # 关键点映射到特征图坐标
+        # 映射到特征图坐标
         kps_f = kps_xyv.copy()
         kps_f[:, 0] = kps_f[:, 0] / self.stride
         kps_f[:, 1] = kps_f[:, 1] / self.stride
 
-        # <新增 2025/09/11> 根据可见关键点的外接框来估算人尺度
+        # 根据可见关键点外接框估算尺度
         vis = (kps_f[:, 2] > 0)
         if np.any(vis):
             xs, ys = kps_f[vis, 0], kps_f[vis, 1]
             w_box = float(xs.max() - xs.min())
             h_box = float(ys.max() - ys.min())
-            side = max(1.0, max(w_box, h_box))  # 至少为1，避免0除
+            side = max(1.0, max(w_box, h_box))
         else:
             side = float(max(self.Wf, self.Hf)) / 4.0  # 兜底
 
-        # 计算关键点与中心的半径
+        # 半径设定
         if self.use_dynamic_radius:
             r_kpt = max(self.min_radius, int(round(self.kpt_radius_factor * side)))
             r_ctr = max(self.min_radius + 1, int(round(self.ctr_radius_factor * side)))
@@ -191,49 +218,32 @@ class CocoKeypointsDataset(Dataset):
             r_kpt = int(self.gr)
             r_ctr = int(self.gr + 1)
 
-        # # 画 heatmaps
-        # for j in range(J):
-        #     v = kps_f[j, 2]
-        #     if v > 0:
-        #         xj, yj = kps_f[j, 0], kps_f[j, 1]
-        #         if xj >= 0 and yj >= 0 and xj < self.Wf and yj < self.Hf:
-        #             draw_gaussian(heatmaps[j], (int(round(xj)), int(round(yj))), self.gr, k=self.sigma_scale)
-        #             kps_mask[j] = 1.0
-
-        # <修改 2025/09/11> 使用 r_kpt 画 heatmaps
+        # 关键点热图与 mask
         for j in range(J):
             v = kps_f[j, 2]
             if v > 0:
-                xj, yj = kps_f[j, 0], kps_f[j, 1]
+                xj, yj = kps_f[j, 0].item(), kps_f[j, 1].item()
                 if 0 <= xj < self.Wf and 0 <= yj < self.Hf:
                     draw_gaussian(heatmaps[j], (int(round(xj)), int(round(yj))), r_kpt, k=self.sigma_scale)
                     kps_mask[j] = 1.0
 
-        # # 画 center（用 center_xy）
-        # cx = center_xy[0] / self.stride
-        # cy = center_xy[1] / self.stride
-        # if 0 <= cx < self.Wf and 0 <= cy < self.Hf:
-        #     draw_gaussian(centers[0], (int(round(cx)), int(round(cy))), self.gr + 1, k=self.sigma_scale)
-
-        # <修改 2025/09/11> 使用 r_crt 画 center
+        # 中心热图（用 center_xy）
         cx = center_xy[0] / self.stride
         cy = center_xy[1] / self.stride
         if 0 <= cx < self.Wf and 0 <= cy < self.Hf:
             draw_gaussian(centers[0], (int(round(cx)), int(round(cy))), r_ctr, k=self.sigma_scale)
 
-        # 计算 regs（以中心网格为锚，写 dx,dy 的整数位）
+        # regs：以中心网格为锚，写 dx, dy（浮点）
         cx_i = int(np.clip(np.floor(cx + 0.5), 0, self.Wf - 1))
         cy_i = int(np.clip(np.floor(cy + 0.5), 0, self.Hf - 1))
         for j in range(J):
             if kps_mask[j] > 0:
                 dx = kps_f[j, 0] - cx
                 dy = kps_f[j, 1] - cy
-                # regs[2 * j,     cy_i, cx_i] = float(np.floor(dx))
-                # regs[2 * j + 1, cy_i, cx_i] = float(np.floor(dy))
                 regs[2 * j,     cy_i, cx_i] = float(dx)
                 regs[2 * j + 1, cy_i, cx_i] = float(dy)
 
-        # 计算 offsets（在每个关键点所在网格记录小数偏移）
+        # offsets：在每个关键点所在网格记录小数偏移
         for j in range(J):
             if kps_mask[j] > 0:
                 xj, yj = kps_f[j, 0], kps_f[j, 1]
@@ -247,75 +257,53 @@ class CocoKeypointsDataset(Dataset):
         return heatmaps, centers, regs, offsets, kps_mask
 
     def __getitem__(self, idx: int):
-        # img_path, anns = self.items[idx]
-        # img = cv2.imread(img_path)
-        # assert img is not None, f"fail to read image: {img_path}"
-        # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        #
-        # # —— 选择一个 person 做“中心”的回归锚（其 keypoints 参与 regs/offset 的中心采样）——
-        # if len(anns) == 1:
-        #     person = anns[0]
-        # else:
-        #     if self.select_person == "largest":
-        #         person = max(anns, key=lambda a: bbox_area(a.get("bbox", [0, 0, 0, 0])))
-        #     else:
-        #         person = anns[np.random.randint(0, len(anns))]
-        #
-        # # 取该人的 keypoints（17*3: x,y,v）
-        # kp = np.array(person["keypoints"], dtype=np.float32).reshape(-1, 3)  # [17,3], 原图坐标
-
-        # --- 核心修改：直接获取图片路径和单个person的标注 ---
-        img_path, person = self.items[idx]  # <-- person 现在是单个标注字典
+        img_path, person = self.items[idx]
         img = cv2.imread(img_path)
         assert img is not None, f"fail to read image: {img_path}"
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # --- 移除整个 "选择一个 person" 的逻辑块 ---
+        # 该 person 的 keypoints（[17,3] 原图坐标）
+        kp = np.array(person["keypoints"], dtype=np.float32).reshape(-1, 3)
 
-        # 直接使用传入的 person 的 keypoints
-        kp = np.array(person["keypoints"], dtype=np.float32).reshape(-1, 3)  # [17,3], 原图坐标
-
-        # 可选：把所有人 heatmap 叠加（常见做法增强监督），但中心 & regs/offset 只用被选的人
-        all_kps = [kp]
-        # for a in anns:
-        #     if a is not person:
-        #         all_kps.append(np.array(a["keypoints"], dtype=np.float32).reshape(-1, 3))
-
-        # —— 先做几何增广（原图坐标系）——
+        # 几何增广
         if self.is_train:
             img, kp = self._augment_geom(img, kp)
 
-        # 简化：只保留被选中者，避免错配
-        all_kps = [kp]
-
-        # —— 颜色增广 ——
+        # 颜色增广
         if self.is_train and self.use_color_aug:
             bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             bgr = apply_hsv(bgr, hgain=0.015, sgain=0.7, vgain=0.4)
             img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-        # —— letterbox 到正方形输入 ——
+        # letterbox 到方形
         img_lb, scale, (pad_w, pad_h) = letterbox(img, self.img_size, color=(114, 114, 114))
 
-        # 把关键点映射到 letterbox 后坐标
+        # 将关键点映射到 letterbox 后坐标
         def map_kps_to_letterbox(kps_xyv: np.ndarray) -> np.ndarray:
             out = kps_xyv.copy()
             out[:, 0] = out[:, 0] * scale + pad_w
             out[:, 1] = out[:, 1] * scale + pad_h
             return out
 
-        mapped_all = [map_kps_to_letterbox(k) for k in all_kps]
-        # 选择“中心”坐标（被选中者）——用可见关键点的均值
-        cx, cy = get_center_from_kps(mapped_all[0])
+        kps_mapped = map_kps_to_letterbox(kp)
 
-        # —— 生成 supervision（特征图尺度）——
-        heatmaps, centers, regs, offsets, kps_mask = self._encode_targets(mapped_all[0], (cx, cy))
+        # 中心点：可见关键点质心；若不可用则 bbox/图像中心兜底
+        cx, cy = get_center_from_kps(kps_mapped)
+        if not (np.isfinite(cx) and np.isfinite(cy)):
+            if "bbox" in person:
+                bx, by, bw, bh = person["bbox"]
+                cx, cy = bx + bw * 0.5, by + bh * 0.5
+            else:
+                cx = cy = float(self.img_size * 0.5)
 
-        # label 拼接
-        label = np.concatenate([heatmaps, centers, regs, offsets], axis=0)  # [17+1+34+34, Hf, Wf] = [86,Hf,Wf]
+        # 生成 supervision
+        heatmaps, centers, regs, offsets, kps_mask = self._encode_targets(kps_mapped, (cx, cy))
 
-        # to tensor
-        img_t = torch.from_numpy(img_lb.transpose(2, 0, 1)).float() / 255.0  # [3,H,W], 0~1
+        # label 拼接: 17 + 1 + 34 + 34 = 86
+        label = np.concatenate([heatmaps, centers, regs, offsets], axis=0)
+
+        # 转 tensor
+        img_t = torch.from_numpy(img_lb.transpose(2, 0, 1)).float() / 255.0
         label_t = torch.from_numpy(label).float()
         kps_mask_t = torch.from_numpy(kps_mask).float()
 
@@ -333,24 +321,31 @@ def create_kpts_dataloader(
         is_train: bool
 ) -> DataLoader:
     """
-    一个工厂函数，用于创建姿态估计任务的 DataLoader。
-    这是新的外部调用接口。
+    工厂函数：创建姿态估计 DataLoader。
+    - 兼容 <root>/train2017 和 <root>/images/train2017 两种结构
+    - 训练集支持完整增广；验证集默认关闭大部分增广，并采用固定半径（更稳定的评估）
     """
     img_dir_name = "train2017" if is_train else "val2017"
     ann_file_name = "person_keypoints_train2017.json" if is_train else "person_keypoints_val2017.json"
 
-    # 兼容两种目录结构: <root>/train2017 和 <root>/images/train2017
     root_path = Path(dataset_root)
     img_root = root_path / "images" / img_dir_name
     if not img_root.is_dir():
         img_root = root_path / img_dir_name
-
     ann_path = root_path / "annotations" / ann_file_name
 
     if not img_root.is_dir() or not ann_path.is_file():
         raise FileNotFoundError(f"Data not found. Checked: {img_root} and {ann_path}")
 
-    # 根据是否为训练集，选择性地应用数据增强
+    # 过滤 aug_cfg 非法键，避免 TypeError
+    valid_keys = {
+        "use_dynamic_radius", "kpt_radius_factor", "ctr_radius_factor",
+        "gaussian_radius", "sigma_scale", "min_radius",
+        "use_color_aug", "use_flip", "use_rotate", "rotate_deg",
+        "use_scale", "scale_range",
+    }
+    safe_aug = {k: v for k, v in (aug_cfg or {}).items() if k in valid_keys}
+
     if is_train:
         dataset = CocoKeypointsDataset(
             img_root=str(img_root),
@@ -358,9 +353,10 @@ def create_kpts_dataloader(
             img_size=img_size,
             target_stride=target_stride,
             is_train=True,
-            **aug_cfg  # 将所有增强相关的配置显式传入
+            **safe_aug
         )
-    else:  # 验证集不使用大部分增强
+    else:
+        # 验证集：默认关闭颜色/几何增广，采用固定半径（可按需改回动态）
         dataset = CocoKeypointsDataset(
             img_root=str(img_root),
             ann_path=str(ann_path),
@@ -370,14 +366,27 @@ def create_kpts_dataloader(
             use_color_aug=False,
             use_flip=False,
             use_rotate=False,
-            use_scale=False
+            use_scale=False,
+            use_dynamic_radius=False,   # 固定半径评估更稳定
+            gaussian_radius=safe_aug.get("gaussian_radius", 2),
+            sigma_scale=safe_aug.get("sigma_scale", 1.0)
         )
 
-    return DataLoader(
-        dataset,
+    # 组装 DataLoader kwargs（避免给 None 的 prefetch_factor）
+    dl_kwargs: Dict[str, Any] = dict(
+        dataset=dataset,
         batch_size=batch_size,
         shuffle=is_train,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        drop_last=is_train
+        drop_last=is_train,
     )
+    if num_workers > 0:
+        dl_kwargs.update(
+            persistent_workers=bool(is_train),
+        )
+        # PyTorch < 2.0 也支持 prefetch_factor；若报错可去掉
+        dl_kwargs.update(prefetch_factor=2)
+        dl_kwargs.update(worker_init_fn=lambda wid: np.random.seed(torch.initial_seed() % 2**32))
+
+    return DataLoader(**dl_kwargs)

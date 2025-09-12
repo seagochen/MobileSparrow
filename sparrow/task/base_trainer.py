@@ -7,9 +7,9 @@ import torch
 import torch.nn as nn
 from torch.amp import autocast, GradScaler
 
-from core.task import common
-from core.task.common import ModelEMA
-from core.utils.logger import logger
+from sparrow.task import common
+from sparrow.task.common import ModelEMA
+from sparrow.utils.logger import logger
 
 
 class BaseTrainer:

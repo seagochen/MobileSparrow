@@ -1,5 +1,5 @@
 import torch.nn as nn
-from core.models import conv_utils
+from sparrow.models import conv_utils
 
 
 class FPNLite(nn.Module):

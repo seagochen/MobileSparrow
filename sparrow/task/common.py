@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Union, Iterable
+from typing import Union
 
 import torch
 from torch import optim
@@ -8,24 +8,24 @@ from torch import optim
 # =========================
 # Schedulers / Optimizers
 # =========================
-def select_scheduler(schedu: str, optimizer):
-    if 'default' in schedu:
-        factor = float(schedu.strip().split('-')[1])
-        patience = int(schedu.strip().split('-')[2])
+def select_scheduler(scheduler: str, optimizer):
+    if 'default' in scheduler:
+        factor = float(scheduler.strip().split('-')[1])
+        patience = int(scheduler.strip().split('-')[2])
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=factor, patience=patience, min_lr=1e-6
         )
-    elif 'step' in schedu:
-        step_size = int(schedu.strip().split('-')[1])
-        gamma = float(schedu.strip().split('-')[2])
+    elif 'step' in scheduler:
+        step_size = int(scheduler.strip().split('-')[1])
+        gamma = float(scheduler.strip().split('-')[2])
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma, last_epoch=-1)
-    elif 'SGDR' in schedu:
-        T_0 = int(schedu.strip().split('-')[1])
-        T_mult = int(schedu.strip().split('-')[2])
+    elif 'SGDR' in scheduler:
+        T_0 = int(scheduler.strip().split('-')[1])
+        T_mult = int(scheduler.strip().split('-')[2])
         scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=T_0, T_mult=T_mult)
-    elif 'MultiStepLR' in schedu:
-        milestones = [int(x) for x in schedu.strip().split('-')[1].split(',')]
-        gamma = float(schedu.strip().split('-')[2])
+    elif 'MultiStepLR' in scheduler:
+        milestones = [int(x) for x in scheduler.strip().split('-')[1].split(',')]
+        gamma = float(scheduler.strip().split('-')[2])
         scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
     else:
         raise Exception("Unknown scheduler.")
@@ -54,7 +54,7 @@ def clip_gradient(
     - 返回裁剪前的总梯度范数，用于日志监控。
     """
     # 收集当前参与更新、且有梯度的参数
-    params: Iterable[torch.nn.Parameter] = []
+    params = []
     for group in optimizer.param_groups:
         for p in group.get("params", []):
             if p is not None and p.grad is not None:

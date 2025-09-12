@@ -1,4 +1,4 @@
-# core/utils/paths.py
+# sparrow/utils/paths.py
 # -*- coding: utf-8 -*-
 from pathlib import Path
 from typing import Iterable, List, Union

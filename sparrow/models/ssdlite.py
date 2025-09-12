@@ -5,10 +5,10 @@ import torch
 import torch.nn as nn
 from torchvision.ops import nms
 
-from core.models.backbones.mobilenet_v2 import MobileNetV2Backbone
-from core.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
-from core.models.necks.fpn_lite import FPNLite
-from core.models.heads.ssd_head import SSDLiteHead
+from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
+from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
+from sparrow.models.necks.fpn_lite import FPNLite
+from sparrow.models.heads.ssd_head import SSDLiteHead
 
 
 BACKBONES = {
