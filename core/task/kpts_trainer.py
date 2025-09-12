@@ -5,19 +5,51 @@ import torch.nn as nn
 from typing import Tuple, Dict
 
 from core.task.base_trainer import BaseTrainer
-from core.loss.movenet_loss import MovenetLoss
+from core.loss.movenet_loss import MoveNetLoss
 from core.metrics.metrics_kpts import movenet_decode, pck_accuracy
 
 
 class KptsTrainer(BaseTrainer):
-    def __init__(self, cfg: Dict, model: nn.Module):
-        super().__init__(cfg, model)
-        self.loss_func = MovenetLoss()
+
+    def __init__(self, model: nn.Module,
+                 *,  # 使用*强制后面的参数为关键字参数，增加代码可读性
+                 epochs: int,
+                 save_dir: str,
+                 img_size: int,
+                 target_stride: int = 4,
+                 num_joints: int = 17,
+                 device: torch.device,
+                 # 优化器与调度器参数
+                 optimizer_cfg: Dict,
+                 scheduler_cfg: Dict,
+                 # 训练技巧参数
+                 use_amp: bool = True,
+                 use_ema: bool = True,
+                 ema_decay: float = 0.9998,
+                 clip_grad_norm: float = 0.0,
+                 # 日志参数
+                 log_interval: int = 10):
+
+        # 初始化父类
+        super().__init__(model,
+                         epochs=epochs,
+                         save_dir=save_dir,
+                         device=device,
+                         optimizer_cfg=optimizer_cfg,
+                         scheduler_cfg=scheduler_cfg,
+                         use_amp=use_amp,
+                         use_ema=use_ema,
+                         ema_decay=ema_decay,
+                         clip_grad_norm=clip_grad_norm,
+                         log_interval=log_interval)
+
+        # 初始化损失函数
+        self.loss_func = MoveNetLoss(num_joints=num_joints)
 
         # 从配置中获取任务特定参数
-        self.img_size = int(self.cfg.get("img_size", 192))
-        self.target_stride = int(self.cfg.get("target_stride", 4))
-        self.target_hw = (self.img_size // self.target_stride, self.img_size // self.target_stride)
+        self.img_size = img_size
+        self.target_stride = target_stride
+        self.target_hw = (img_size // self.target_stride, img_size // self.target_stride)
 
     def _align_output(self, output: Dict) -> Dict:
         """将模型输出的四头resize到与标签一致的尺寸"""
@@ -52,8 +84,8 @@ class KptsTrainer(BaseTrainer):
         out_dict = self._align_output(raw_out)
 
         # 解码得到坐标
-        pred_coords = movenet_decode(out_dict, kps_mask, mode='output', img_size=self.img_size)
-        gt_coords = movenet_decode(labels, kps_mask, mode='label', img_size=self.img_size)
+        pred_coords = movenet_decode(out_dict, kps_mask, mode='output')
+        gt_coords = movenet_decode(labels, kps_mask, mode='label')
 
         # 计算PCK正确率
         correct_counts, total_in_batch = pck_accuracy(pred_coords, gt_coords, img_size=self.img_size)

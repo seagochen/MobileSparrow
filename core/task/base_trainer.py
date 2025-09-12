@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import gc
 import os
-from copy import deepcopy
 from typing import Dict, Tuple
 
 import torch
@@ -9,57 +8,57 @@ import torch.nn as nn
 from torch.amp import autocast, GradScaler
 
 from core.task import common
-
-
-class ModelEMA:
-    """ 模型指数移动平均 (Model Exponential Moving Average) """
-
-    def __init__(self, model, decay=0.9998):
-        self.ema = deepcopy(model).eval()
-        self.decay = float(decay)
-        for p in self.ema.parameters():
-            p.requires_grad_(False)
-
-    @torch.no_grad()
-    def update(self, model):
-        d = self.decay
-        msd = model.state_dict()
-        for k, v in self.ema.state_dict().items():
-            if k in msd and v.dtype == msd[k].dtype:
-                v.copy_(v * d + msd[k] * (1.0 - d))
-
-    def state_dict(self):
-        return self.ema.state_dict()
+from core.task.common import ModelEMA
+from core.utils.logger import logger
 
 
 class BaseTrainer:
+
     """
-    一个通用的训练器基类，封装了标准的训练和验证循环。
-    子类需要实现 _calculate_loss 和 _calculate_metrics 方法。
+    一个通用的训练器基类（重构版）。
+    所有配置通过显式参数传入，而不是通过一个统一的cfg字典。
     """
 
-    def __init__(self, cfg: Dict, model: nn.Module):
-        self.cfg = cfg
-        use_cuda = (self.cfg.get('GPU_ID', '') != '' and torch.cuda.is_available())
-        self.device = torch.device("cuda" if use_cuda else "cpu")
-        self.model = model.to(self.device)
+    def __init__(self,
+                 model: nn.Module,
+                 *,  # 使用*强制后面的参数为关键字参数，增加代码可读性
+                 epochs: int,
+                 save_dir: str,
+                 device: torch.device,
+                 # 优化器与调度器参数
+                 optimizer_cfg: Dict,
+                 scheduler_cfg: Dict,
+                 # 训练技巧参数
+                 use_amp: bool = True,
+                 use_ema: bool = True,
+                 ema_decay: float = 0.9998,
+                 clip_grad_norm: float = 0.0,
+                 # 日志参数
+                 log_interval: int = 10
+                 ):
 
-        # --- 通用组件 ---
-        self.optimizer = common.getOptimizer(
-            self.cfg['optimizer'], self.model, self.cfg['learning_rate'], self.cfg['weight_decay']
+        # --- 核心组件 ---
+        self.model = model.to(device)
+        self.device = device
+        self.epochs = epochs
+        self.save_dir = save_dir
+
+        # --- 训练技巧 ---
+        self.scaler = GradScaler(enabled=use_amp)
+        self.ema = ModelEMA(self.model, decay=ema_decay) if use_ema else None
+        self.clip_grad_norm = clip_grad_norm
+
+        # --- 优化器和调度器 ---
+        # 现在从专门的字典中创建，职责更清晰
+        self.optimizer = common.select_optimizer(
+            optimizer_cfg['name'], self.model, optimizer_cfg['lr'], optimizer_cfg['weight_decay']
         )
-        self.scheduler = common.getSchedu(self.cfg['scheduler'], self.optimizer)
-        self.scaler = GradScaler(enabled=self.cfg.get("amp", True))
-        self.ema = ModelEMA(self.model, decay=self.cfg.get("ema_decay", 0.9998)) if self.cfg.get("ema", True) else None
+        self.scheduler = common.select_scheduler(scheduler_cfg['name'], self.optimizer)
 
         # --- 状态记录 ---
-        self.save_dir = self.cfg["save_dir"]
         os.makedirs(self.save_dir, exist_ok=True)
-        # 约定：best_score 越大越好
         self.best_score = float("-inf")
-        self.epochs = int(self.cfg.get("epochs", 140))
-        self.log_interval = int(self.cfg.get("log_interval", 10))
-        self.clip_grad = float(self.cfg.get("clip_gradient", 0.0))
+        self.log_interval = log_interval
 
     def train(self, train_loader, val_loader):
         """ 训练主循环 (模板方法) """
@@ -93,9 +92,9 @@ class BaseTrainer:
             self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
 
-            if self.clip_grad > 0:
-                self.scaler.unscale_(self.optimizer)
-                common.clipGradient(self.optimizer, self.clip_grad)
+            if self.clip_grad_norm > 0:
+                self.scaler.unscale_(self.optimizer)                    # 先反缩放 AMP 梯度
+                common.clip_gradient(self.optimizer, self.clip_grad_norm)    # 范数裁剪, 避免梯度爆炸
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -158,7 +157,7 @@ class BaseTrainer:
     def _log_stats(self, stage, epoch, epochs, meters: Dict):
         log_str = " ".join([f"{k}={v:.4f}" for k, v in meters.items()])
         lr = self.optimizer.param_groups[0]['lr']
-        print(f"LR: {lr:f} - [{stage}] {epoch + 1}/{epochs} {log_str}")
+        logger.info("STATUS", f"LR: {lr:f} - [{stage}] {epoch + 1}/{epochs} {log_str}")
 
     def _save_checkpoints(self, score: float, epoch: int):
         net_to_save = self.ema.ema if self.ema else self.model
@@ -167,9 +166,9 @@ class BaseTrainer:
             self.best_score = score
             best_path = os.path.join(self.save_dir, "best.pt")
             torch.save(net_to_save.state_dict(), best_path)
-            print(f"[INFO] New best: main_score={score:.5f} -> saved to {best_path}")
+            logger.warning("SAVING", f"[INFO] New best: main_score={score:.5f} -> saved to {best_path}")
         else:
-            print(f"[INFO] Kept best: main_score={self.best_score:.5f} (current {score:.5f})")
+            logger.warning("SAVING", f"[INFO] Kept best: main_score={self.best_score:.5f} (current {score:.5f})")
 
     def _on_train_end(self):
         print("Training finished.")

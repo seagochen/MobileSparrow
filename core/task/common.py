@@ -1,10 +1,14 @@
+from copy import deepcopy
+from typing import Union, Iterable
+
+import torch
 from torch import optim
 
 
 # =========================
 # Schedulers / Optimizers
 # =========================
-def getSchedu(schedu: str, optimizer):
+def select_scheduler(schedu: str, optimizer):
     if 'default' in schedu:
         factor = float(schedu.strip().split('-')[1])
         patience = int(schedu.strip().split('-')[2])
@@ -28,7 +32,7 @@ def getSchedu(schedu: str, optimizer):
     return scheduler
 
 
-def getOptimizer(optims: str, model, learning_rate: float, weight_decay: float):
+def select_optimizer(optims: str, model, learning_rate: float, weight_decay: float):
     if optims == 'Adam':
         optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     elif optims == 'SGD':
@@ -38,8 +42,52 @@ def getOptimizer(optims: str, model, learning_rate: float, weight_decay: float):
     return optimizer
 
 
-def clipGradient(optimizer, grad_clip=1.0):
+def clip_gradient(
+        optimizer,
+        max_norm: float = 1.0,
+        norm_type: Union[float, int] = 2.0,
+        error_if_nonfinite: bool = False
+) -> float:
+    """
+    按“全局范数”裁剪梯度（更常用/更稳定）。
+    - 需在 AMP 下先调用 scaler.unscale_(optimizer) 再调用本函数。
+    - 返回裁剪前的总梯度范数，用于日志监控。
+    """
+    # 收集当前参与更新、且有梯度的参数
+    params: Iterable[torch.nn.Parameter] = []
     for group in optimizer.param_groups:
-        for param in group["params"]:
-            if param.grad is not None:
-                param.grad.data.clamp_(-grad_clip, grad_clip)
+        for p in group.get("params", []):
+            if p is not None and p.grad is not None:
+                params.append(p)
+
+    if not params:
+        return 0.0
+
+    total_norm = torch.nn.utils.clip_grad_norm_(
+        params, max_norm, norm_type=norm_type, error_if_nonfinite=error_if_nonfinite
+    )
+    # 返回 float 方便打印/记录
+    return float(total_norm) if isinstance(total_norm, torch.Tensor) else total_norm
+
+# =========================
+# EMA
+# =========================
+class ModelEMA:
+    """ 模型指数移动平均 (Model Exponential Moving Average) """
+
+    def __init__(self, model, decay=0.9998):
+        self.ema = deepcopy(model).eval()
+        self.decay = float(decay)
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model):
+        d = self.decay
+        msd = model.state_dict()
+        for k, v in self.ema.state_dict().items():
+            if k in msd and v.dtype == msd[k].dtype:
+                v.copy_(v * d + msd[k] * (1.0 - d))
+
+    def state_dict(self):
+        return self.ema.state_dict()

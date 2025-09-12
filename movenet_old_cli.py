@@ -12,60 +12,25 @@ Unified CLI for MoveNet project:
 依赖：PyTorch、opencv-python、numpy、onnx(导出时)、onnxruntime(可选验证)
 """
 
-import os
 import argparse
 import json
-import random
+import os
 from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
 import torch
+from torch import DataLoader
 from torch.utils.data import DataLoader
 
 import core
 from core.datasets.simple_loader import SimpleImageFolder
-from core.datasets.coco_loader import CoCo2017DataLoader
-from core.task.task_kpts import KptsTask
 from core.models.movenet import MoveNet
 from core.models.onnx.dummy_movenet import DummyMoveNet
 
 
 # ----------------------------------------------------------------------
-# 工具
-# ----------------------------------------------------------------------
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def load_json(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_json(obj: Dict[str, Any], path: str):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-
-
-def merge_cfg(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    cfg = dict(base)
-    for k, v in override.items():
-        if v is not None:
-            cfg[k] = v
-    return cfg
-
-
-def ensure_dir(p: str):
-    Path(p).mkdir(parents=True, exist_ok=True)
-
-
-# ----------------------------------------------------------------------
-# 组装模型与数据
+# 组装模型
 # ----------------------------------------------------------------------
 def build_model(cfg: Dict[str, Any]) -> torch.nn.Module:
     num_joints = cfg.get("num_classes", cfg.get("task_params", {}).get("num_joints", 17))
@@ -77,11 +42,6 @@ def build_model(cfg: Dict[str, Any]) -> torch.nn.Module:
         backbone=cfg.get("backbone", "mobilenet_v2"),
     )
     return model
-
-
-def build_data(cfg: Dict[str, Any]):
-    # 强制使用关键点任务
-    return CoCo2017DataLoader(cfg, task="kpts")
 
 
 # ----------------------------------------------------------------------

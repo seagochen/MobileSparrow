@@ -1,222 +1,188 @@
+# -*- coding: utf-8 -*-
 """
-@Fire
-改：适配新 MoveNet( dict 输出 ) & 动态特征图尺寸
+MoveNet 损失函数（重构版）
+
+包含五个核心损失组件：
+1. Heatmap Loss: 监督关节点位置的主要热图。
+2. Center Loss: 监督人体中心点热图。
+3. Regression Loss: 监督从中心点到各关节点的粗略位移向量。
+4. Offset Loss: 监督各关节点的亚像素偏移，用于精调定位。
+5. Bone Loss: 作为正则化项，隐式地监督人体骨骼结构的合理性。
 """
 
-import os
-
-import numpy as np
 import torch
+import torch.nn as nn
+from typing import Tuple, List, Dict
 
-# 原来写死：_img_size=192, _feature_map_size=_img_size//4, 现在全部改为“运行时从张量尺寸推断”
-_CENTER_WEIGHT_NPY = 'core/data/center_weight_origin.npy'
-
-
-class JointBoneLoss(torch.nn.Module):
-    def __init__(self, joint_num):
+class BoneLoss(nn.Module):
+    """
+    计算预测热图与目标热图之间，成对骨骼长度（范数）差异的损失。
+    这是一种结构化的正则化，鼓励模型生成符合人体工学的姿态。
+    """
+    def __init__(self, num_joints: int = 17):
         super().__init__()
-        id_i, id_j = [], []
-        for i in range(joint_num):
-            for j in range(i + 1, joint_num):
-                id_i.append(i)
-                id_j.append(j)
-        self.id_i = id_i
-        self.id_j = id_j
+        # 创建所有关节点对的索引
+        indices_i, indices_j = [], []
+        for i in range(num_joints):
+            for j in range(i + 1, num_joints):
+                indices_i.append(i)
+                indices_j.append(j)
+        self.indices_i = indices_i
+        self.indices_j = indices_j
 
-    def forward(self, joint_out, joint_gt):
-        # joint_out/joint_gt: [B, J, H, W] (heatmaps) — 用热力图的成对骨段差的范数作为“骨段一致性”(代理)
-        J = torch.norm(joint_out[:, self.id_i, :, :] - joint_out[:, self.id_j, :, :], p=2, dim=(-2, -1))
-        Y = torch.norm(joint_gt[:, self.id_i, :, :] - joint_gt[:, self.id_j, :, :], p=2, dim=(-2, -1))
-        loss = torch.abs(J - Y)
-        return torch.sum(loss) / joint_out.shape[0] / len(self.id_i)
-
-
-def _make_center_weight(hw, device, dtype):
-    """按当前特征图尺寸生成中心加权图（值域 0~1，中心高权重）。"""
-    H, W = hw
-    yy, xx = torch.meshgrid(
-        torch.linspace(-1, 1, H, device=device, dtype=dtype),
-        torch.linspace(-1, 1, W, device=device, dtype=dtype),
-        indexing="ij"
-    )
-    rr2 = xx ** 2 + yy ** 2
-    # 高斯：中心 1，边缘趋近 0
-    weight = torch.exp(-rr2 / 0.15)  # sigma^2 ~= 0.15，可按需调
-    return weight  # [H, W]
+    def forward(self, pred_heatmaps: torch.Tensor, gt_heatmaps: torch.Tensor) -> torch.Tensor:
+        # [B, J, H, W] -> [B, num_pairs]
+        pred_norm = torch.norm(pred_heatmaps[:, self.indices_i] - pred_heatmaps[:, self.indices_j], p=2, dim=(-2, -1))
+        gt_norm = torch.norm(gt_heatmaps[:, self.indices_i] - gt_heatmaps[:, self.indices_j], p=2, dim=(-2, -1))
+        
+        loss = torch.abs(pred_norm - gt_norm)
+        
+        # 按 batch size 和骨骼数量进行平均
+        batch_size = pred_heatmaps.shape[0]
+        return torch.sum(loss) / batch_size / len(self.indices_i)
 
 
-class MovenetLoss(torch.nn.Module):
-    def __init__(self, use_target_weight=False, target_weight=[1]):
+class MoveNetLoss(nn.Module):
+    def __init__(self, num_joints: int = 17):
         super().__init__()
-        self.use_target_weight = use_target_weight
-        self.target_weight = target_weight
-        self.boneloss = JointBoneLoss(17)
+        self.num_joints = num_joints
+        self.bone_loss = BoneLoss(num_joints=self.num_joints)
+        self._center_weight_cache: Dict[Tuple, torch.Tensor] = {}
 
-        # 运行时缓存中心权重（按尺寸）
-        self._center_cache = None  # (H, W, tensor)
+    # --- 核心损失计算 ---
+    def forward(self,
+                predictions: List[torch.Tensor],
+                targets: torch.Tensor,
+                kps_mask: torch.Tensor
+                ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        
+        pred_heatmaps, pred_centers, pred_regs, pred_offsets = predictions
+        B, _, H, W = pred_heatmaps.shape
+        
+        # 1. 从集成的 target tensor 中解析出各地图
+        gt_heatmaps = targets[:, :self.num_joints]
+        gt_centers = targets[:, self.num_joints:self.num_joints + 1]
+        gt_regs = targets[:, self.num_joints + 1:self.num_joints + 1 + 2 * self.num_joints]
+        gt_offsets = targets[:, self.num_joints + 1 + 2 * self.num_joints:]
 
-        # 兼容旧逻辑：尝试读取 npy（若存在且尺寸匹配则用，否则动态生成）
-        self._center_weight_npy = _CENTER_WEIGHT_NPY
+        # 2. 计算各项损失
+        loss_heatmap = self._weighted_mse_loss(pred_heatmaps, gt_heatmaps)
+        loss_bone = self.bone_loss(pred_heatmaps, gt_heatmaps)
+        loss_center = self._weighted_mse_loss(pred_centers, gt_centers)
 
-    # ---------- 小工具 ----------
-    def l1(self, pre, target, kps_mask):
-        # pre/target: [B], kps_mask: [B]
-        return torch.sum(torch.abs(pre - target) * kps_mask) / (kps_mask.sum() + 1e-4)
+        # 3. 找到GT中心点，作为回归和偏移损失的锚点
+        center_weight = self._get_center_weight((B, H, W), device=targets.device, dtype=targets.dtype)
+        center_x, center_y = self._get_max_point(gt_centers, center_weight)
 
-    def myMSEwithWeight(self, pre, target):
-        # pre/target: [B, C, H, W], target ∈ [0,1]
-        loss = torch.pow((pre - target), 2)
-        weight_mask = target * 8 + 1  # 前景更重
+        loss_regs = self._compute_regs_loss(pred_regs, gt_regs, center_x, center_y, kps_mask)
+        loss_offset = self._compute_offset_loss(pred_offsets, gt_offsets, center_x, center_y, gt_regs, kps_mask)
+
+        return loss_heatmap, loss_bone, loss_center, loss_regs, loss_offset
+
+    # --- 私有辅助方法 ---
+    def _weighted_mse_loss(self, pred: torch.Tensor, gt: torch.Tensor, weight: float = 8.0) -> torch.Tensor:
+        """ 带前景加权的均方误差损失 """
+        loss = torch.pow((pred - gt), 2)
+        weight_mask = gt * weight + 1.0
         loss = loss * weight_mask
-        return torch.sum(loss) / (target.shape[0] * target.shape[1])
+        # 按 batch 和 channel 平均
+        return torch.sum(loss) / (gt.shape[0] * gt.shape[1])
+        
+    def _l1_loss(self, pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """ 带掩码的L1损失 """
+        loss = torch.abs(pred - gt) * mask
+        # 仅对有效数据点（mask.sum()）进行平均
+        loss = torch.sum(loss) / (mask.sum() + 1e-4)
+        return loss
 
-    def heatmapL1(self, pre, target):
-        loss = torch.abs(pre - target)
-        weight_mask = target * 4 + 1
-        loss = loss * weight_mask
-        return torch.sum(loss) / (target.shape[0] * target.shape[1])
+    def _compute_regs_loss(self, pred_regs, gt_regs, center_x, center_y, kps_mask) -> torch.Tensor:
+        """ 计算回归损失 (向量化版本) """
+        B, _, H, W = pred_regs.shape
+        batch_indices = torch.arange(B, device=pred_regs.device)
 
-    def centernet_focal(self, pred, gt):
-        pos = gt.eq(1).float()
-        neg = gt.lt(1).float()
-        neg_weights = torch.pow(1 - gt, 4)
-        pos_loss = torch.log(pred + 1e-6) * torch.pow(1 - pred, 2) * pos
-        neg_loss = torch.log(1 - pred + 1e-6) * torch.pow(pred, 2) * neg_weights * neg
-        num_pos = pos.sum()
-        if num_pos == 0:
-            return -neg_loss.sum()
-        return -(pos_loss.sum() + neg_loss.sum()) / num_pos
+        # 在 GT 中心点 (center_y, center_x) 提取所有回归预测值和目标值
+        # pred_at_center 的形状: [B, 2*J]
+        pred_at_center = pred_regs[batch_indices, :, center_y, center_x]
+        gt_at_center = gt_regs[batch_indices, :, center_y, center_x]
 
-    def _ensure_center_weight(self, B, H, W, device, dtype):
-        """
-        返回形状为 [B,1,H,W] 的中心权重图。
-        优先使用 npy（尺寸匹配）；否则按尺寸生成并缓存。
-        """
-        need_regen = True
-        if self._center_cache is not None:
-            h0, w0, ten = self._center_cache
-            if (h0, w0) == (H, W) and ten.device == device and ten.dtype == dtype:
-                need_regen = False
+        # Reshape for easier calculation: [B, 2*J] -> [B, J, 2]
+        pred_vectors = pred_at_center.view(B, self.num_joints, 2)
+        gt_vectors = gt_at_center.view(B, self.num_joints, 2)
+        
+        # 扩展 kps_mask 以匹配向量维度: [B, J] -> [B, J, 1]
+        mask = kps_mask.unsqueeze(-1)
 
-        if need_regen:
-            weight = None
-            if os.path.isfile(self._center_weight_npy):
-                try:
-                    arr = np.load(self._center_weight_npy)
-                    if arr.ndim == 2 and arr.shape == (H, W):
-                        weight = torch.from_numpy(arr).to(device=device, dtype=dtype)
-                except Exception:
-                    weight = None
-            if weight is None:
-                weight = _make_center_weight((H, W), device, dtype)
+        # 计算带掩码的 L1 损失
+        return self._l1_loss(pred_vectors, gt_vectors, mask)
 
-            self._center_cache = (H, W, weight)
+    def _compute_offset_loss(self, pred_offsets, gt_offsets, center_x, center_y, gt_regs, kps_mask) -> torch.Tensor:
+        """ 计算偏移量损失 (向量化版本) """
+        B, _, H, W = pred_offsets.shape
+        batch_indices = torch.arange(B, device=pred_offsets.device)
 
-        # [H,W] -> [B,1,H,W]
-        return self._center_cache[2].view(1, 1, H, W).repeat(B, 1, 1, 1).requires_grad_(False)
+        # 1. 计算每个关节点的目标整数坐标 (gt_kps_y, gt_kps_x)
+        # gt_regs_at_center: [B, 2*J]
+        gt_regs_at_center = gt_regs[batch_indices, :, center_y, center_x]
+        gt_vectors = gt_regs_at_center.view(B, self.num_joints, 2)
 
-    # ---------- 主损失 ----------
-    def heatmapLoss(self, pred, target, batch_size):
-        return self.myMSEwithWeight(pred, target)
+        # gt_kps_coords: [B, J, 2], 浮点坐标
+        gt_kps_coords = gt_vectors + torch.stack([center_x, center_y], dim=-1).float()
+        
+        # 转换为整数坐标并限制在边界内
+        gt_kps_x_int = torch.clamp(gt_kps_coords[:, :, 0], 0, W - 1).long() # [B, J]
+        gt_kps_y_int = torch.clamp(gt_kps_coords[:, :, 1], 0, H - 1).long() # [B, J]
+        
+        # 2. 在目标整数坐标上提取预测和GT的偏移量
+        # 构造用于 advanced indexing 的索引
+        batch_idx_flat = batch_indices.view(B, 1).expand(-1, self.num_joints) # [B, J]
+        
+        # 提取 x 和 y 的偏移量
+        pred_off_x = pred_offsets.view(B, self.num_joints, 2, H, W)[batch_idx_flat, torch.arange(self.num_joints), 0, gt_kps_y_int, gt_kps_x_int]
+        pred_off_y = pred_offsets.view(B, self.num_joints, 2, H, W)[batch_idx_flat, torch.arange(self.num_joints), 1, gt_kps_y_int, gt_kps_x_int]
+        gt_off_x = gt_offsets.view(B, self.num_joints, 2, H, W)[batch_idx_flat, torch.arange(self.num_joints), 0, gt_kps_y_int, gt_kps_x_int]
+        gt_off_y = gt_offsets.view(B, self.num_joints, 2, H, W)[batch_idx_flat, torch.arange(self.num_joints), 1, gt_kps_y_int, gt_kps_x_int]
+        
+        pred_offsets_gathered = torch.stack([pred_off_x, pred_off_y], dim=-1) # [B, J, 2]
+        gt_offsets_gathered = torch.stack([gt_off_x, gt_off_y], dim=-1) # [B, J, 2]
 
-    def centerLoss(self, pred, target, batch_size):
-        return self.myMSEwithWeight(pred, target)
+        # 3. 计算带掩码的 L1 损失
+        mask = kps_mask.unsqueeze(-1)
+        return self._l1_loss(pred_offsets_gathered, gt_offsets_gathered, mask)
 
-    def regsLoss(self, pred, target, cx0, cy0, kps_mask, batch_size, num_joints):
-        # 逐关节点在 (cy0,cx0) 位置取回归值（dx,dy），做 L1
-        _dim0 = torch.arange(0, batch_size, device=pred.device).long()
-        _dim1 = torch.zeros(batch_size, device=pred.device).long()
-        loss = 0
-        for idx in range(num_joints):
-            gt_x = target[_dim0, _dim1 + idx * 2, cy0, cx0]
-            gt_y = target[_dim0, _dim1 + idx * 2 + 1, cy0, cx0]
-            pre_x = pred[_dim0, _dim1 + idx * 2, cy0, cx0]
-            pre_y = pred[_dim0, _dim1 + idx * 2 + 1, cy0, cx0]
-            loss += self.l1(pre_x, gt_x, kps_mask[:, idx])
-            loss += self.l1(pre_y, gt_y, kps_mask[:, idx])
-        return loss / num_joints
-
-    def offsetLoss(self, pred, target, cx0, cy0, regs, kps_mask, batch_size, num_joints, H, W):
-        _dim0 = torch.arange(0, batch_size, device=pred.device).long()
-        _dim1 = torch.zeros(batch_size, device=pred.device).long()
-        loss = 0
-        for idx in range(num_joints):
-            gt_x = (regs[_dim0, _dim1 + idx * 2, cy0, cx0].long() + cx0).clamp_(0, W - 1)
-            gt_y = (regs[_dim0, _dim1 + idx * 2 + 1, cy0, cx0].long() + cy0).clamp_(0, H - 1)
-
-            gt_off_x = target[_dim0, _dim1 + idx * 2, gt_y, gt_x]
-            gt_off_y = target[_dim0, _dim1 + idx * 2 + 1, gt_y, gt_x]
-            pre_off_x = pred[_dim0, _dim1 + idx * 2, gt_y, gt_x]
-            pre_off_y = pred[_dim0, _dim1 + idx * 2 + 1, gt_y, gt_x]
-
-            loss += self.l1(pre_off_x, gt_off_x, kps_mask[:, idx])
-            loss += self.l1(pre_off_y, gt_off_y, kps_mask[:, idx])
-        return loss / num_joints
-
-    def _maxPointPth(self, heatmap, center_weight=None):
-        """
-        heatmap: [B,1,H,W]
-        center_weight: [B,1,H,W] or None
-        返回坐标 (x,y): LongTensor [B]
-        """
+    def _get_max_point(self, heatmap: torch.Tensor, center_weight: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """ 在特征图上找到峰值点坐标 """
         if center_weight is not None:
             heatmap = heatmap * center_weight
-        n, c, h, w = heatmap.shape
-        flat = heatmap.view(n, -1)
+            
+        B, _, H, W = heatmap.shape
+        flat = heatmap.view(B, -1)
         _, max_id = torch.max(flat, dim=1)
-        y = (max_id // w).long()
-        x = (max_id % w).long()
+        
+        y = (max_id // W).long()
+        x = (max_id % W).long()
         return x, y
+        
+    @staticmethod
+    def _create_center_weight(hw: Tuple[int, int], device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """ 动态生成高斯中心权重图 """
+        H, W = hw
+        yy, xx = torch.meshgrid(
+            torch.linspace(-1, 1, H, device=device, dtype=dtype),
+            torch.linspace(-1, 1, W, device=device, dtype=dtype),
+            indexing="ij"
+        )
+        # sigma^2 约等于 0.15
+        weight = torch.exp(-(xx ** 2 + yy ** 2) / 0.15)
+        return weight
 
-    def forward(self, output, target, kps_mask=None):
-        """
-        output:
-          - 新模型(dict): {"heatmaps": [B,J,H,W], "centers":[B,1,H,W], "regs":[B,2J,H,W], "offsets":[B,2J,H,W]}
-          - 兼容旧(list/tuple): [heatmaps, centers, regs, offsets]
-        target: [B, 17 + 1 + 34 + 34, H, W]  (与 pred 同 H,W)
-        kps_mask: [B, 17]，若为 None 则默认全 1
-        """
-        # --- 1) 解包预测 ---
-        if isinstance(output, dict):
-            heatmaps_p = output["heatmaps"]
-            centers_p = output["centers"]
-            regs_p = output["regs"]
-            offsets_p = output["offsets"]
-        else:
-            heatmaps_p, centers_p, regs_p, offsets_p = output
-
-        B, J, H, W = heatmaps_p.shape
-        if kps_mask is None:
-            kps_mask = torch.ones((B, J), device=heatmaps_p.device, dtype=heatmaps_p.dtype)
-
-        # --- 2) 解析目标 ---
-        # 约定 target channel 排布：17(hm) | 1(center) | 34(regs) | 34(offsets)
-        heatmaps_t = target[:, :J, :, :]
-        centers_t  = target[:, J:J+1, :, :]
-        regs_t     = target[:, J+1:J+1+2*J, :, :]
-        offsets_t  = target[:, J+1+2*J:, :, :]
-
-        # --- 3) 中心权重（按尺寸） ---
-        center_weight = self._ensure_center_weight(B, H, W, device=target.device, dtype=target.dtype)
-
-        # --- 4) 各项损失 ---
-        heatmap_loss = self.heatmapLoss(heatmaps_p, heatmaps_t, B)
-        bone_loss    = self.boneloss(heatmaps_p, heatmaps_t)  # 代理骨段一致性
-        center_loss  = self.centerLoss(centers_p, centers_t, B)
-
-        # 最大中心位置（在 GT center 上取，以稳定回归）
-        cx0, cy0 = self._maxPointPth(centers_t, center_weight=center_weight)
-        cx0 = cx0.clamp_(0, W - 1)
-        cy0 = cy0.clamp_(0, H - 1)
-
-        regs_loss   = self.regsLoss(regs_p, regs_t, cx0, cy0, kps_mask, B, J)
-        offset_loss = self.offsetLoss(offsets_p, offsets_t, cx0, cy0, regs_t, kps_mask, B, J, H, W)
-
-        return [heatmap_loss, bone_loss, center_loss, regs_loss, offset_loss]
-
-
-# # 兼容你原来的全局实例 & 入口
-# movenetLoss = MovenetLoss(use_target_weight=False)
-
-# def calculate_loss(predict, label, kps_mask=None):
-#     return movenetLoss(predict, label, kps_mask)
+    def _get_center_weight(self, shape: Tuple, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """ 返回与输入尺寸匹配的中心权重图，使用缓存 """
+        B, H, W = shape
+        cache_key = (H, W, device, dtype)
+        
+        if cache_key not in self._center_weight_cache:
+            weight_hw = self._create_center_weight((H, W), device, dtype)
+            self._center_weight_cache[cache_key] = weight_hw
+        
+        weight = self._center_weight_cache[cache_key]
+        return weight.view(1, 1, H, W).expand(B, -1, -1, -1).requires_grad_(False)

@@ -9,9 +9,40 @@ from core.task.base_trainer import BaseTrainer
 
 
 class DetTrainer(BaseTrainer):
-    def __init__(self, cfg: Dict, model: nn.Module):
-        super().__init__(cfg, model)
-        num_classes = getattr(self.model, "num_classes", int(cfg.get("num_classes", 81)))
+
+    def __init__(self, model: nn.Module,
+                 *,  # 使用*强制后面的参数为关键字参数，增加代码可读性
+                 epochs: int,
+                 save_dir: str,
+                 img_size: int,
+                 target_stride: int = 4,
+                 num_classes: int,
+                 device: torch.device,
+                 # 优化器与调度器参数
+                 optimizer_cfg: Dict,
+                 scheduler_cfg: Dict,
+                 # 训练技巧参数
+                 use_amp: bool = True,
+                 use_ema: bool = True,
+                 ema_decay: float = 0.9998,
+                 clip_grad_norm: float = 0.0,
+                 # 日志参数
+                 log_interval: int = 10):
+
+        # 初始化父类
+        super().__init__(model,
+                         epochs=epochs,
+                         save_dir=save_dir,
+                         device=device,
+                         optimizer_cfg=optimizer_cfg,
+                         scheduler_cfg=scheduler_cfg,
+                         use_amp=use_amp,
+                         use_ema=use_ema,
+                         ema_decay=ema_decay,
+                         clip_grad_norm=clip_grad_norm,
+                         log_interval=log_interval)
+
+        num_classes = num_classes
         self.criterion = SSDLoss(num_classes=num_classes)
 
     def _calculate_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:

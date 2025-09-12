@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 import json, os
+from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 import cv2, numpy as np, torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from core.datasets.common import letterbox, apply_hsv
 
 
@@ -187,3 +188,65 @@ class CocoDetDataset(Dataset):
         keep = (wh[:, 0] > 1) & (wh[:, 1] > 1)
 
         return img_out, boxes_t[keep], keep
+
+
+def det_collate_fn(batch):
+    imgs, targets = zip(*batch)
+    return torch.stack(imgs, 0), list(targets)
+
+
+def create_det_dataloader(
+        dataset_root: str,
+        img_size: int,
+        batch_size: int,
+        num_workers: int,
+        pin_memory: bool,
+        aug_cfg: Dict[str, Any],
+        class_filter: Optional[List[int]],
+        is_train: bool
+) -> DataLoader:
+    """
+    一个工厂函数，用于创建目标检测任务的 DataLoader。
+    """
+    img_dir_name = "train2017" if is_train else "val2017"
+    ann_file_name = "instances_train2017.json" if is_train else "instances_val2017.json"
+
+    root_path = Path(dataset_root)
+    img_root = root_path / "images" / img_dir_name
+    if not img_root.is_dir(): img_root = root_path / img_dir_name
+    ann_path = root_path / "annotations" / ann_file_name
+
+    if not img_root.is_dir() or not ann_path.is_file():
+        raise FileNotFoundError(f"Data not found. Checked: {img_root} and {ann_path}")
+
+    if is_train:
+        dataset = CocoDetDataset(
+            img_root=str(img_root),
+            ann_path=str(ann_path),
+            img_size=img_size,
+            is_train=True,
+            class_filter=class_filter,
+            **aug_cfg
+        )
+    else:
+        dataset = CocoDetDataset(
+            img_root=str(img_root),
+            ann_path=str(ann_path),
+            img_size=img_size,
+            is_train=False,
+            class_filter=class_filter,
+            use_color_aug=False,
+            use_hflip=False,
+            use_rotate=False,
+            use_scale=False
+        )
+
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=is_train,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=is_train,
+        collate_fn=det_collate_fn
+    )

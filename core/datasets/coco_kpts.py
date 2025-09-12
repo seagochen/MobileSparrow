@@ -1,137 +1,105 @@
-# core/dataloader.py
+# core/datasets/coco_kpts.py
 # -*- coding: utf-8 -*-
-"""
-Unified COCO Keypoints dataset for MoveNet-style training
-- 合并原 dataloader.py / data_augment.py / data_tools.py
-- 输出 (img, label_tensor, kps_mask, img_path)
-- label 通道顺序: [17 heatmaps] + [1 center] + [34 regs] + [34 offsets]
-- 特征图尺寸: img_size // target_stride（默认为 4）
-"""
-
 import json
 import os
+from pathlib import Path
 from typing import List, Tuple, Dict, Any
 
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset
-from core.datasets.common import (random_affine_points, draw_gaussian, 
-        bbox_area, apply_hsv, letterbox, get_center_from_kps)
+from torch.utils.data import Dataset, DataLoader
 
-# -----------------------
-# 数据集
-# -----------------------
+from core.datasets.common import (random_affine_points, draw_gaussian,
+                                  apply_hsv, letterbox, get_center_from_kps)
+
 
 class CocoKeypointsDataset(Dataset):
+    """
+    COCO姿态估计数据集 (内聚版本)。
+    负责加载图像和标注，并应用所有必要的变换。
+    """
+
     def __init__(self,
                  img_root: str,
                  ann_path: str,
-                 img_size: int = 192,
-                 target_stride: int = 4,
-                 gaussian_radius: int = 2,
-                 sigma_scale: float = 1.0,
-
-                 # <新增 2025/09/11>
+                 img_size: int,
+                 target_stride: int,
+                 is_train: bool,
+                 *,  # 强制后面的参数为关键字参数
                  use_dynamic_radius: bool = True,
                  kpt_radius_factor: float = 0.025,
                  ctr_radius_factor: float = 0.035,
                  min_radius: int = 1,
-                 # <新增 2025/09/11>
-
                  use_color_aug: bool = True,
                  use_flip: bool = True,
                  use_rotate: bool = True,
                  rotate_deg: float = 30.0,
                  use_scale: bool = True,
-                 scale_range: Tuple[float, float] = (0.75, 1.25),
-                 select_person: str = "largest",  # 在多人情况下，使用bbox最大或 "random"
-                 is_train: bool = True):
+                 scale_range: Tuple[float, float] = (0.75, 1.25)):
         super().__init__()
-        # 规范根目录为绝对路径
+        # --- 核心属性 ---
         self.img_root = os.path.abspath(img_root)
         self.ann_path = ann_path
-        self.img_size = int(img_size)
-        self.stride = int(target_stride)
+        self.img_size = img_size
+        self.stride = target_stride
         self.Hf = self.img_size // self.stride
         self.Wf = self.img_size // self.stride
-
-        self.gr = int(gaussian_radius)
-        self.sigma_scale = float(sigma_scale)
-
-        # <新增 2025/09/11>
-        self.use_dynamic_radius = bool(use_dynamic_radius)
-        self.kpt_radius_factor = float(kpt_radius_factor)
-        self.ctr_radius_factor = float(ctr_radius_factor)
-        self.min_radius = int(min_radius)
-        # -----
-
         self.is_train = is_train
 
+        # --- 增广和目标生成参数 ---
+        self.use_dynamic_radius = use_dynamic_radius
+        self.kpt_radius_factor = kpt_radius_factor
+        self.ctr_radius_factor = ctr_radius_factor
+        self.min_radius = min_radius
         self.use_color_aug = use_color_aug
         self.use_flip = use_flip
         self.use_rotate = use_rotate
-        self.rotate_deg = float(rotate_deg)
+        self.rotate_deg = rotate_deg
         self.use_scale = use_scale
         self.scale_range = scale_range
-        self.select_person = select_person
 
-        # 读取 COCO 风格标注（subset 仅 person）
+        # --- 加载和预处理标注 ---
+        self.items = self._load_annotations()
+        self.imgid_to_info = self._get_img_info_dict()
+
+    def _load_annotations(self) -> List[Tuple[str, Dict[str, Any]]]:
+        # ... (这里粘贴您 coco_kpts.py 中完整的标注加载和处理逻辑) ...
+        # ... (即从 with open(ann_path) 到 for person_ann in anns: self.items.append(...) 的所有代码) ...
         with open(self.ann_path, "r") as f:
-            ann = json.load(f)
+            ann_json = json.load(f)
 
-        self.imgid_to_info: Dict[int, Dict[str, Any]] = {im["id"]: im for im in ann["images"]}
-
-        # 读取 person 类 id（默认回退 1）
-        cats = ann.get("categories", [])
-        person_id = next((c["id"] for c in cats if c.get("name") == "person"), 1)
-
-        anns_all = [a for a in ann["annotations"] if a.get("category_id", person_id) == person_id]
+        person_id = next((c["id"] for c in ann_json.get("categories", []) if c.get("name") == "person"), 1)
+        anns_all = [a for a in ann_json["annotations"] if a.get("category_id", person_id) == person_id]
         if self.is_train:
-            # 训练时常见的清洗：剔除 crowd 或 无关键点 的样本
             anns_all = [a for a in anns_all if a.get("iscrowd", 0) == 0 and a.get("num_keypoints", 0) > 0]
 
-        # 按 image_id 聚合
-        imgid_to_anns: Dict[int, List[Dict[str, Any]]] = {}
+        imgid_to_info = {im["id"]: im for im in ann_json["images"]}
+        imgid_to_anns = {}
         for a in anns_all:
             imgid_to_anns.setdefault(a["image_id"], []).append(a)
 
-        # # 仅保留至少有一个 annotation 的图像；路径统一为“绝对路径”
-        # self.items: List[Tuple[str, List[Dict[str, Any]]]] = []
-        # for img_id, anns in imgid_to_anns.items():
-        #     info = self.imgid_to_info.get(img_id)
-        #     if not info:
-        #         continue
-        #     file_name = info.get("file_name")
-        #     if not file_name:
-        #         continue
-        #     img_path = os.path.abspath(os.path.join(self.img_root, file_name))
-        #     if os.path.isfile(img_path):
-        #         self.items.append((img_path, anns))
-
-        # <新增 2025/09/11> 为图中的每一个人都创建一个独立的样本
-        self.items: List[Tuple[str, Dict[str, Any]]] = []
+        items = []
         for img_id, anns in imgid_to_anns.items():
-            info = self.imgid_to_info.get(img_id)
-            if not info:
-                continue
-            file_name = info.get("file_name")
-            if not file_name:
-                continue
-            img_path = os.path.abspath(os.path.join(self.img_root, file_name))
-            if os.path.isfile(img_path):
-                # --- 核心修改：遍历这张图里的每一个人 ---
-                for person_ann in anns:
-                    # 将 (图片路径, 单个person的标注) 作为一条数据添加到 self.items
-                    self.items.append((img_path, person_ann))
+            info = imgid_to_info.get(img_id)
+            if info and info.get("file_name"):
+                path = os.path.abspath(os.path.join(self.img_root, info["file_name"]))
+                if os.path.isfile(path):
+                    for person_ann in anns:
+                        items.append((path, person_ann))
 
-        if not self.items:
-            raise FileNotFoundError(f"No images found via annotations under: {self.img_root}")
+        if not items:
+            raise FileNotFoundError(f"No valid items found under: {self.img_root} with {self.ann_path}")
+        return items
+
+    def _get_img_info_dict(self) -> Dict[int, Dict[str, Any]]:
+        with open(self.ann_path, "r") as f:
+            ann_json = json.load(f)
+        return {im["id"]: im for im in ann_json["images"]}
 
     def __len__(self):
         return len(self.items)
 
-    # ---- 增广：几何 + 颜色 ----
     def _augment_geom(self, img: np.ndarray, kps_xyv: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         在 letterbox 前做随机仿射：缩放、旋转、水平翻转（对 kps 同步仿射）
@@ -320,13 +288,13 @@ class CocoKeypointsDataset(Dataset):
         # 简化：只保留被选中者，避免错配
         all_kps = [kp]
 
-        # —— 颜色增广 —— 
+        # —— 颜色增广 ——
         if self.is_train and self.use_color_aug:
             bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             bgr = apply_hsv(bgr, hgain=0.015, sgain=0.7, vgain=0.4)
             img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-        # —— letterbox 到正方形输入 —— 
+        # —— letterbox 到正方形输入 ——
         img_lb, scale, (pad_w, pad_h) = letterbox(img, self.img_size, color=(114, 114, 114))
 
         # 把关键点映射到 letterbox 后坐标
@@ -352,3 +320,64 @@ class CocoKeypointsDataset(Dataset):
         kps_mask_t = torch.from_numpy(kps_mask).float()
 
         return img_t, label_t, kps_mask_t, img_path
+
+
+def create_kpts_dataloader(
+        dataset_root: str,
+        img_size: int,
+        target_stride: int,
+        batch_size: int,
+        num_workers: int,
+        pin_memory: bool,
+        aug_cfg: Dict[str, Any],
+        is_train: bool
+) -> DataLoader:
+    """
+    一个工厂函数，用于创建姿态估计任务的 DataLoader。
+    这是新的外部调用接口。
+    """
+    img_dir_name = "train2017" if is_train else "val2017"
+    ann_file_name = "person_keypoints_train2017.json" if is_train else "person_keypoints_val2017.json"
+
+    # 兼容两种目录结构: <root>/train2017 和 <root>/images/train2017
+    root_path = Path(dataset_root)
+    img_root = root_path / "images" / img_dir_name
+    if not img_root.is_dir():
+        img_root = root_path / img_dir_name
+
+    ann_path = root_path / "annotations" / ann_file_name
+
+    if not img_root.is_dir() or not ann_path.is_file():
+        raise FileNotFoundError(f"Data not found. Checked: {img_root} and {ann_path}")
+
+    # 根据是否为训练集，选择性地应用数据增强
+    if is_train:
+        dataset = CocoKeypointsDataset(
+            img_root=str(img_root),
+            ann_path=str(ann_path),
+            img_size=img_size,
+            target_stride=target_stride,
+            is_train=True,
+            **aug_cfg  # 将所有增强相关的配置显式传入
+        )
+    else:  # 验证集不使用大部分增强
+        dataset = CocoKeypointsDataset(
+            img_root=str(img_root),
+            ann_path=str(ann_path),
+            img_size=img_size,
+            target_stride=target_stride,
+            is_train=False,
+            use_color_aug=False,
+            use_flip=False,
+            use_rotate=False,
+            use_scale=False
+        )
+
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=is_train,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=is_train
+    )
