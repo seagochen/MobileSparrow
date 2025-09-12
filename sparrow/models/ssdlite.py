@@ -55,7 +55,7 @@ class SSDLite(nn.Module):
         c3, c4, c5 = self.backbone(x)
 
         # FPN -> [P3,P4,P5]
-        feats = self.neck(c3, c4, c5)  # list of 3 tensors
+        feats = self.neck(c3, c4, c5)  # 输出 p3, p4, p5 三个尺度的特征数据
 
         # Multi-level heads
         cls_list, reg_list = [], []
