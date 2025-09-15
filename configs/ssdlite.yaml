@@ -66,7 +66,7 @@ data:
   train:
     builder: coco_dets_dataloader     # alias -> sparrow.datasets.coco_dets.create_det_dataloader
     args:
-      dataset_root: /path/to/coco     # <-- 改成你的 COCO 根目录
+      dataset_root:  ./data/coco2017_ssdlite    # <-- 改成你的 COCO 根目录
       img_size: 320
       batch_size: 64
       num_workers: 8

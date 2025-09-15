@@ -52,14 +52,40 @@ def build_scheduler(
     raise ValueError(f"Unknown scheduler name: {name!r}")
 
 
-def select_optimizer(optims: str, model, learning_rate: float, weight_decay: float):
-    if optims == 'Adam':
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    elif optims == 'SGD':
-        optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
+# def select_optimizer(optims: str, model, learning_rate: float, weight_decay: float):
+#     if optims == 'Adam':
+#         optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+#     elif optims == 'SGD':
+#         optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
+#     else:
+#         raise Exception("Unknown optimizer.")
+#     return optimizer
+def select_optimizer(name: str, params_or_model, lr: float, weight_decay: float = 0.0, **kw):
+    """
+    兼容两种调用方式：
+      - select_optimizer("adamw", model, lr=..., ...)            # 传 model，本函数内部取 .parameters()
+      - select_optimizer("adamw", model.parameters(), lr=..., ...)  # 传 params，可迭代
+    """
+    # 兼容 nn.Module / Iterable[Tensor]
+    if isinstance(params_or_model, torch.nn.Module):
+        params = params_or_model.parameters()
     else:
-        raise Exception("Unknown optimizer.")
-    return optimizer
+        params = params_or_model
+
+    name = (name or "").lower()
+    if name in ("adam",):
+        return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay,
+                                betas=kw.get("betas", (0.9, 0.999)))
+    if name in ("adamw", "adam_w"):
+        return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay,
+                                 betas=kw.get("betas", (0.9, 0.999)))
+    if name in ("sgd",):
+        return torch.optim.SGD(params, lr=lr,
+                               momentum=kw.get("momentum", 0.9),
+                               weight_decay=weight_decay,
+                               nesterov=kw.get("nesterov", True))
+    raise Exception("Unknown optimizer.")
+
 
 
 def clip_gradient(
