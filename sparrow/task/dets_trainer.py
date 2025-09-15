@@ -70,9 +70,6 @@ class DetsTrainer(BaseTrainer):
                  epochs: int,
                  save_dir: str,
                  img_size: int,
-                 strides: Tuple[int, int, int] = (8, 16, 32),
-                 ratios: Tuple[float, ...] = (1.0, 2.0, 0.5),
-                 scales: Tuple[float, ...] = (1.0, 1.26),
                  device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                  optimizer_cfg: Dict = None,
                  scheduler_name: str = "MultiStepLR",
@@ -92,6 +89,10 @@ class DetsTrainer(BaseTrainer):
                  clip_grad_norm: float = 0.0,
                  log_interval: int = 10,
                  alpha_reg: float = 1.0):
+
+        # ⭐️⭐️⭐️ 关键改动：在 super() 之前保存原始模型 ⭐️⭐️⭐️
+        original_model = model
+
         super().__init__(
             model,
             epochs=epochs,
@@ -106,13 +107,17 @@ class DetsTrainer(BaseTrainer):
             clip_grad_norm=clip_grad_norm, log_interval=log_interval
         )
 
-        self.img_size = int(img_size)
-        # self.strides  = tuple(strides)
+        # 确保原始模型有所需属性
+        assert hasattr(original_model, "ratios"), "Model must have 'ratios' attribute."
+        assert hasattr(original_model, "scales"), "Model must have 'scales' attribute."
+        assert hasattr(original_model, "strides"), "Model must have 'strides' attribute."
 
-        # 直接从模型获取配置，保证一致性
-        self.ratios   = self.model.ratios                         # <--- 修改后的代码
-        self.scales   = self.model.scales                         # <--- 修改后的代码
-        self.strides = self.model.strides
+        self.img_size = int(img_size)
+
+        # ⭐️⭐️⭐️ 关键改动：从 original_model 获取配置 ⭐️⭐️⭐️
+        self.ratios   = original_model.ratios
+        self.scales   = original_model.scales
+        self.strides  = original_model.strides
 
         # 损失函数（确保 model.num_classes 含背景类）
         self.loss_func = SSDLoss(num_classes=getattr(self.model, "num_classes", None) or 81,

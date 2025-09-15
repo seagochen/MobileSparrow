@@ -129,7 +129,7 @@ def assign_anchors(anchors_cxcywh: torch.Tensor,
         matched_gt = gts_xyxy[iou_idx[pos]]     # [P,4]
         matched_lb = gts_labels[iou_idx[pos]]   # [P]  (1..C-1)
         reg_t[pos] = encode_gt_to_deltas(matched_gt, anchors_cxcywh[pos])
-        cls_t[pos] = matched_lb
+        cls_t[pos] = matched_lb + 1  # <--- 在这里加上 1
 
     return cls_t, reg_t, pos
 
@@ -254,7 +254,7 @@ def pack_targets_for_ssd(targets_list: List[torch.Tensor], img_size: int) -> Dic
             boxes_norm.append(t.new_zeros((0, 4)))
             labels.append(torch.zeros((0,), dtype=torch.long, device=t.device))
             continue
-        cls = t[:, 0].long() + 1               # 0..C-1 -> 1..C-1
+        cls = t[:, 0].long()
         b   = t[:, 1:5] / float(img_size)      # 归一化
         b   = b.clamp(0, 1)
         boxes_norm.append(b)
