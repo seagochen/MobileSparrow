@@ -34,9 +34,7 @@ trainer:
     epochs: 300
     save_dir: outputs/ssdlite_coco
     img_size: 320
-    strides: [8, 16, 32]
-    ratios: [1.0, 2.0, 0.5]
-    scales: [1.0, 1.26]
+#    strides: [8, 16, 32]
 
     # 优化器
     optimizer_cfg:
@@ -66,7 +64,7 @@ data:
   train:
     builder: coco_dets_dataloader     # alias -> sparrow.datasets.coco_dets.create_det_dataloader
     args:
-      dataset_root:  ./data/coco2017_ssdlite    # <-- 改成你的 COCO 根目录
+      dataset_root:  ./data/coco2017_ssdlite
       img_size: 320
       batch_size: 64
       num_workers: 8
@@ -80,7 +78,7 @@ data:
   val:
     builder: coco_dets_dataloader
     args:
-      dataset_root: /path/to/coco     # <-- 同上
+      dataset_root: ./data/coco2017_ssdlite
       img_size: 320
       batch_size: 64
       num_workers: 8

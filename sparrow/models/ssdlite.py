@@ -30,6 +30,7 @@ class SSDLite(nn.Module):
         super().__init__()
         assert backbone in BACKBONES, f"unknown backbone: {backbone}"
         self.num_classes = int(num_classes)
+        self.strides = (8, 16, 32)  # <--- ⭐️ 在这里添加这一行
 
         # 1) Backbone
         self.backbone = BACKBONES[backbone](width_mult=width_mult)

@@ -107,9 +107,12 @@ class DetsTrainer(BaseTrainer):
         )
 
         self.img_size = int(img_size)
-        self.strides  = tuple(strides)
-        self.ratios   = tuple(ratios)
-        self.scales   = tuple(scales)
+        # self.strides  = tuple(strides)
+
+        # 直接从模型获取配置，保证一致性
+        self.ratios   = self.model.ratios                         # <--- 修改后的代码
+        self.scales   = self.model.scales                         # <--- 修改后的代码
+        self.strides = self.model.strides
 
         # 损失函数（确保 model.num_classes 含背景类）
         self.loss_func = SSDLoss(num_classes=getattr(self.model, "num_classes", None) or 81,
