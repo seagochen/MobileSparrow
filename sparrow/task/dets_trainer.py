@@ -135,6 +135,8 @@ class DetsTrainer(BaseTrainer):
         imgs, targets_list, _ = batch
 
         out = self.model(imgs)
+        self._maybe_build_anchors_from_output(out["cls_logits"])
+        
         cls_logits = torch.cat(out["cls_logits"], dim=1)  # [B,A,C]
         bbox_regs  = torch.cat(out["bbox_regs"],  dim=1)  # [B,A,4]
 
@@ -151,6 +153,8 @@ class DetsTrainer(BaseTrainer):
         imgs, targets_list, _ = batch
 
         out = model(imgs)
+        self._maybe_build_anchors_from_output(out["cls_logits"])
+
         cls_logits = torch.cat(out["cls_logits"], dim=1)
         bbox_regs  = torch.cat(out["bbox_regs"],  dim=1)
 
@@ -169,3 +173,58 @@ class DetsTrainer(BaseTrainer):
         imgs = imgs.to(self.device, non_blocking=True)
         return imgs, targets_list, img_paths
 
+    def _maybe_build_anchors_from_output(self, cls_logits_list: List[torch.Tensor]) -> None:
+        """
+        根据实际输出长度，稳健地推断每层 H、W、stride，并生成 anchors。
+        A_per_loc = len(ratios) * len(scales)
+        L_i = H_i * W_i * A_per_loc
+        """
+        A_per_loc = len(self.ratios) * len(self.scales)
+        # 已有且匹配则直接返回
+        total_L = sum(int(t.shape[1]) for t in cls_logits_list)
+        if self.anchors is not None and self.anchors.shape[0] == total_L:
+            return
+
+        feat_shapes: List[Tuple[int, int]] = []
+        dyn_strides: List[int] = []  # 由 H 推断的 stride: s_i = img_size // H_i
+        debug_rows = []  # 收集信息便于报错
+
+        for i, cls_i in enumerate(cls_logits_list):
+            L_i = int(cls_i.shape[1])  # H*W*A
+            if L_i % A_per_loc != 0:
+                raise RuntimeError(
+                    f"[anchors] Level {i}: length {L_i} 不能被 A_per_loc={A_per_loc} 整除。"
+                    f" 请检查 head 的 ratios/scales 是否与 trainer/model 一致。"
+                )
+            N_i = L_i // A_per_loc  # H*W
+            # 经验上 H=W，多数轻量 FPN 都是方图；若不是完全平方数，做个兜底。
+            H_i = int(round(N_i ** 0.5))
+            W_i = H_i
+            if H_i * W_i != N_i:
+                # 兜底：用默认 stride 推一个近似网格
+                default_stride = self.strides[i] if i < len(self.strides) else self.strides[-1]
+                H_i = max(1, self.img_size // int(default_stride))
+                W_i = H_i
+            feat_shapes.append((H_i, W_i))
+            s_i = max(1, self.img_size // H_i)
+            dyn_strides.append(s_i)
+            debug_rows.append((i, L_i, A_per_loc, N_i, H_i, W_i, s_i))
+
+        # 生成 anchors（严格按推断出来的 H、W 和 stride）
+        anchors = generate_ssd_anchors(
+            img_size=self.img_size,
+            feat_shapes=feat_shapes,
+            strides=dyn_strides,
+            ratios=self.ratios,
+            scales=self.scales,
+        )
+        self.anchors = anchors.to(self.device)
+
+        # 再校验一次长度是否一致，若不一致，打印详细信息
+        if self.anchors.shape[0] != total_L:
+            lines = ["[anchors] 生成后长度不匹配：",
+                     f"  anchors={self.anchors.shape[0]}, total_L={total_L}, "
+                     f"A_per_loc={A_per_loc}, ratios={self.ratios}, scales={self.scales}"]
+            for (i, L_i, Apl, N_i, H_i, W_i, s_i) in debug_rows:
+                lines.append(f"  L{i}={L_i} -> N{i}={N_i} = H{i}*W{i}={H_i}*{W_i}, s{i}={s_i}")
+            raise RuntimeError("\n".join(lines))
