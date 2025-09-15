@@ -8,48 +8,48 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 
-from sparrow.loss.ssdlite_loss import SSDLoss
+from sparrow.loss.ssdlite_loss import SSDLoss, pack_targets_for_ssd, generate_ssd_anchors
 from sparrow.task.base_trainer import BaseTrainer
 
-
-@torch.no_grad()
-def generate_ssd_anchors(img_size: int,
-                         feat_shapes: List[Tuple[int, int]],
-                         strides: List[int],
-                         ratios: Tuple[float, ...] = (1.0, 2.0, 0.5),
-                         scales: Tuple[float, ...] = (1.0, 1.26)) -> torch.Tensor:
-    device = torch.device('cpu')
-    all_anchors = []
-    for (H, W), s in zip(feat_shapes, strides):
-        ys = (torch.arange(H, device=device) + 0.5) * s
-        xs = (torch.arange(W, device=device) + 0.5) * s
-        cy, cx = torch.meshgrid(ys, xs, indexing='ij')  # [H,W]
-        cx = (cx / img_size).reshape(-1, 1)
-        cy = (cy / img_size).reshape(-1, 1)
-        anchors_lvl = []
-        for r in ratios:
-            for sc in scales:
-                w = (sc * s * math.sqrt(r)) / img_size
-                h = (sc * s / math.sqrt(r)) / img_size
-                wh = torch.full((H * W, 2), 0.0, device=device)
-                wh[:, 0] = w; wh[:, 1] = h
-                anchors_lvl.append(torch.cat([cx, cy, wh], dim=1))  # [H*W,4]
-        all_anchors.append(torch.cat(anchors_lvl, dim=0))  # [H*W*A,4]
-    return torch.cat(all_anchors, dim=0)  # [A_total,4]
-
-
-def pack_targets_for_ssd(targets_list: List[torch.Tensor], img_size: int) -> Dict[str, List[torch.Tensor]]:
-    boxes_norm, labels = [], []
-    for t in targets_list:
-        if t.numel() == 0:
-            boxes_norm.append(t.new_zeros((0, 4)))
-            labels.append(torch.zeros((0,), dtype=torch.long, device=t.device))
-            continue
-        cls = t[:, 0].long() + 1              # 0..C-1 -> 1..C-1（0留给背景）
-        b   = (t[:, 1:5] / float(img_size)).clamp(0, 1)
-        boxes_norm.append(b)
-        labels.append(cls)
-    return {"boxes": boxes_norm, "labels": labels}
+#
+# @torch.no_grad()
+# def generate_ssd_anchors(img_size: int,
+#                          feat_shapes: List[Tuple[int, int]],
+#                          strides: List[int],
+#                          ratios: Tuple[float, ...] = (1.0, 2.0, 0.5),
+#                          scales: Tuple[float, ...] = (1.0, 1.26)) -> torch.Tensor:
+#     device = torch.device('cpu')
+#     all_anchors = []
+#     for (H, W), s in zip(feat_shapes, strides):
+#         ys = (torch.arange(H, device=device) + 0.5) * s
+#         xs = (torch.arange(W, device=device) + 0.5) * s
+#         cy, cx = torch.meshgrid(ys, xs, indexing='ij')  # [H,W]
+#         cx = (cx / img_size).reshape(-1, 1)
+#         cy = (cy / img_size).reshape(-1, 1)
+#         anchors_lvl = []
+#         for r in ratios:
+#             for sc in scales:
+#                 w = (sc * s * math.sqrt(r)) / img_size
+#                 h = (sc * s / math.sqrt(r)) / img_size
+#                 wh = torch.full((H * W, 2), 0.0, device=device)
+#                 wh[:, 0] = w; wh[:, 1] = h
+#                 anchors_lvl.append(torch.cat([cx, cy, wh], dim=1))  # [H*W,4]
+#         all_anchors.append(torch.cat(anchors_lvl, dim=0))  # [H*W*A,4]
+#     return torch.cat(all_anchors, dim=0)  # [A_total,4]
+#
+#
+# def pack_targets_for_ssd(targets_list: List[torch.Tensor], img_size: int) -> Dict[str, List[torch.Tensor]]:
+#     boxes_norm, labels = [], []
+#     for t in targets_list:
+#         if t.numel() == 0:
+#             boxes_norm.append(t.new_zeros((0, 4)))
+#             labels.append(torch.zeros((0,), dtype=torch.long, device=t.device))
+#             continue
+#         cls = t[:, 0].long() + 1              # 0..C-1 -> 1..C-1（0留给背景）
+#         b   = (t[:, 1:5] / float(img_size)).clamp(0, 1)
+#         boxes_norm.append(b)
+#         labels.append(cls)
+#     return {"boxes": boxes_norm, "labels": labels}
 
 
 def _infer_feat_shapes(img_size: int, strides: Tuple[int, int, int]) -> List[Tuple[int, int]]:
