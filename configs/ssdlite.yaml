@@ -1,0 +1,89 @@
+# ssdlite.yaml —— COCO 检测训练
+
+# 可选：通用设置
+seed: 42
+deterministic: false
+verbose: true
+
+# 预训练/恢复（可选）
+# resume: outputs/ssdlite_coco/last.pt
+# weights: outputs/ssdlite_coco/best.pt
+
+# -----------------------------
+# 模型
+# -----------------------------
+model:
+  class: ssdlite                      # alias -> sparrow.models.ssdlite.SSDLite
+  args:
+    num_classes: 81                   # ★ 注意：包含背景类（80 + 1）
+    backbone: mobilenet_v2            # 或 shufflenet_v2
+    width_mult: 1.0
+    neck_outc: 96
+    anchor_ratios: [1.0, 2.0, 0.5]
+    anchor_scales: [1.0, 1.26]
+
+# -----------------------------
+# 训练器（基于 BaseTrainer 的 DetsTrainer）
+# -----------------------------
+trainer:
+  class: dets_trainer                 # alias -> sparrow.task.dets_trainer.DetsTrainer
+  # 若还没改文件名/路径，可用 file 形式：
+  # class: file:./sparrow/task/dets_trainenr.py:DetsTrainer
+  args:
+    # 基本
+    epochs: 300
+    save_dir: outputs/ssdlite_coco
+    img_size: 320
+    strides: [8, 16, 32]
+    ratios: [1.0, 2.0, 0.5]
+    scales: [1.0, 1.26]
+
+    # 优化器
+    optimizer_cfg:
+      name: adamw
+      lr: 0.0003
+      weight_decay: 0.05
+
+    # 学习率调度（与 BaseTrainer 对齐的参数）
+    scheduler_name: MultiStepLR       # 可选：CosineAnnealingWarmRestarts / ReduceLROnPlateau / StepLR / MultiStepLR
+    milestones: [120, 200, 260]
+    gamma: 0.1
+
+    # 训练技巧
+    use_amp: true
+    use_ema: true
+    ema_decay: 0.9998
+    clip_grad_norm: 5.0
+    log_interval: 50
+
+    # 损失（传给 SSDLoss 的关键权重）
+    alpha_reg: 1.0
+
+# -----------------------------
+# 数据
+# -----------------------------
+data:
+  train:
+    builder: coco_dets_dataloader     # alias -> sparrow.datasets.coco_dets.create_det_dataloader
+    args:
+      dataset_root: /path/to/coco     # <-- 改成你的 COCO 根目录
+      img_size: 320
+      batch_size: 64
+      num_workers: 8
+      pin_memory: true
+      is_train: true
+      aug_cfg:
+        rotate_deg: 15.0
+        scale_range: [0.75, 1.25]
+        min_box_size: 2.0
+
+  val:
+    builder: coco_dets_dataloader
+    args:
+      dataset_root: /path/to/coco     # <-- 同上
+      img_size: 320
+      batch_size: 64
+      num_workers: 8
+      pin_memory: true
+      is_train: false
+      aug_cfg: {}

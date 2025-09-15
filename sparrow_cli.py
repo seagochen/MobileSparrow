@@ -50,10 +50,11 @@ ALIASES: Dict[str, str] = {
     "dummy_ssdlite": "sparrow.models.onnx.dummy_ssdlite.DummySSDLite",
     # Datasets / Dataloaders
     "coco_kpts_dataloader": "sparrow.datasets.coco_kpts.create_kpts_dataloader",
+    "coco_dets_dataloader": "sparrow.datasets.coco_dets.create_dets_dataloader",
     "simple_image_folder": "sparrow.datasets.simple_loader.SimpleImageFolder",
     # Trainers
     "kpts_trainer": "sparrow.task.kpts_trainer.KptsTrainer",
-    "det_trainer": "sparrow.task.det_trainer.DetTrainer",
+    "dets_trainer": "sparrow.task.dets_trainer.DetsTrainer",
 }
 
 

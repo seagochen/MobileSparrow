@@ -253,7 +253,7 @@ def det_collate_fn(batch):
     return imgs, list(targets), list(paths)
 
 
-def create_det_dataloader(
+def create_dets_dataloader(
         dataset_root: str,
         img_size: int,
         batch_size: int,

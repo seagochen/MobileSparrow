@@ -1,8 +1,8 @@
 # 任务与通用
-task: kpts
-task_params:                # （可选）如果你的导出/推理会用到
-  num_joints: 17
-  export_keypoints: true
+#task: kpts
+#task_params:                # （可选）如果你的导出/推理会用到
+#  num_joints: 17
+#  export_keypoints: true
 
 # 复现/日志
 seed: 42
