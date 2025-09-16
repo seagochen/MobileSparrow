@@ -1,8 +1,4 @@
-# 任务与通用
-task: kpts
-task_params:                # （可选）如果你的导出/推理会用到
-  num_joints: 17
-  export_keypoints: true
+# configs/movenet.yaml
 
 # 复现/日志
 seed: 42
@@ -39,7 +35,7 @@ trainer:
 
     # ---- 其它参数略 ----
     optimizer_cfg:
-      name: Adam
+      name: adam
       lr: 0.00035
       weight_decay: 0.0001
 

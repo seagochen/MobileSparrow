@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
 from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
-from sparrow.models.necks.fpn_lite import FPNLite
+from sparrow.models.necks.fpn_lite_kpts import FPNLiteKpts
 from sparrow.models.heads.movenet_head import MoveNetHead
 
 
@@ -29,7 +29,7 @@ class MoveNet(nn.Module):
 
         # 2) 动态获取 C3/C4/C5 通道，配置 FPN
         c3c, c4c, c5c = self.backbone.get_out_channels()
-        self.neck = FPNLite(c3=c3c, c4=c4c, c5=c5c, outc=neck_outc)
+        self.neck = FPNLiteKpts(c3=c3c, c4=c4c, c5=c5c, outc=neck_outc)
 
         # 3) 头部
         self.head = MoveNetHead(neck_outc, num_joints=num_joints, midc=head_midc)
