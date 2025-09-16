@@ -184,7 +184,6 @@ data:
 │       ├── logger.py
 │       └── paths.py
 ├── movenet_cli.py
-├── output
 ├── requirements.txt
 ├── scripts
 │   ├── common.py

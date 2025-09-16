@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import gc
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Literal
 
 import torch
 from torch import optim
@@ -26,14 +26,16 @@ class BaseTrainer:
                  epochs: int,
                  save_dir: str,
                  device: torch.device,
-                 # 优化器与调度器参数
-                 optimizer_cfg: Dict,
-                # —— 学习率调度器改为明参 —— 
+                 # 优化器
+                 optimizer_name: str,
+                 learning_rate: float,
+                 weight_decay: float,
+                 # 学习率调度器
                  scheduler_name: str,
                  milestones=None,
                  gamma: float = 0.1,
                  step_size: int = 30,
-                 mode: str = "max",
+                 mode: Literal["min", "max"] = "max",
                  factor: float = 0.5,
                  patience: int = 5,
                  min_lr: float = 1e-6,
@@ -63,19 +65,30 @@ class BaseTrainer:
         # --- 优化器和调度器 ---
         # 现在从专门的字典中创建，职责更清晰
         self.optimizer = common.select_optimizer(
-            optimizer_cfg['name'], self.model, optimizer_cfg['lr'], optimizer_cfg['weight_decay']
-        )
+            name=optimizer_name,
+            model=self.model,
+            lr=learning_rate,
+            weight_decay=weight_decay)
         # 明参构建调度器（不再接受 dict / 字符串）
         self.scheduler = common.build_scheduler(
-            scheduler_name, self.optimizer,
-            milestones=milestones, gamma=gamma, step_size=step_size,
-            mode=mode, factor=factor, patience=patience, min_lr=min_lr,
-            T_0=T_0, T_mult=T_mult, last_epoch=last_epoch
+            scheduler_name,
+            self.optimizer,
+            milestones=milestones,
+            gamma=gamma,
+            step_size=step_size,
+            mode=mode,
+            factor=factor,
+            patience=patience,
+            min_lr=min_lr,
+            T_0=T_0,
+            T_mult=T_mult,
+            last_epoch=last_epoch
         )
 
         # --- 状态记录 ---
         os.makedirs(self.save_dir, exist_ok=True)
-        self.best_score = float("-inf")
+        self.main_mode = (mode or "max").lower()
+        self.best_score = float("-inf") if self.main_mode == "max" else float("inf")
         self.log_interval = log_interval
 
     def train(self, train_loader, val_loader):
@@ -163,14 +176,16 @@ class BaseTrainer:
         raise NotImplementedError
 
     # --- Helper 方法 ---
-    def _update_meters(self, meters: Dict, new_values: Dict, batch_size: int):
+    @staticmethod
+    def _update_meters(meters: Dict, new_values: Dict, batch_size: int):
         for k, v in new_values.items():
             if k not in meters:
                 meters[k] = [0.0, 0]  # value_sum, count
             meters[k][0] += v * batch_size
             meters[k][1] += batch_size
 
-    def _get_mean_meters(self, meters: Dict) -> Dict[str, float]:
+    @staticmethod
+    def _get_mean_meters(meters: Dict) -> Dict[str, float]:
         return {k: v[0] / max(1, v[1]) for k, v in meters.items()}
 
     def _log_iter_stats(self, epoch, epochs, i, total_i, meters: Dict):
@@ -198,7 +213,8 @@ class BaseTrainer:
         torch.save(checkpoint, os.path.join(self.save_dir, "last.pt"))
 
         # Save the best checkpoint if necessary
-        if score > self.best_score:
+        better = (score > self.best_score) if self.main_mode == "max" else (score < self.best_score)
+        if better:
             self.best_score = score
 
             # Update the best score in the checkpoint for saving to 'best.pt'

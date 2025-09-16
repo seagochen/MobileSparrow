@@ -11,7 +11,7 @@
 - 其他依赖（BaseTrainer、MoveNetLoss）保持原导入路径不变，如路径不同请按你的工程结构调整。
 """
 
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Literal
 
 import numpy as np
 import torch
@@ -210,14 +210,16 @@ class KptsTrainer(BaseTrainer):
                  target_stride: int = 4,
                  num_joints: int = 17,
                  device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-                 # —— 优化器仍是 dict —— 
-                 optimizer_cfg: Dict = None,
+                 # —— 优化器改为明参数 ——
+                 optimizer_name: str,
+                 learning_rate: float,
+                 weight_decay: float,
                  # —— 调度器改为明参 —— 
                  scheduler_name: str = "MultiStepLR",
                  milestones=None,
                  gamma: float = 0.1,
                  step_size: int = 30,
-                 mode: str = "max",
+                 mode: Literal["min", "max"] = "min",
                  factor: float = 0.5,
                  patience: int = 5,
                  min_lr: float = 1e-6,
@@ -237,8 +239,9 @@ class KptsTrainer(BaseTrainer):
             epochs=epochs,
             save_dir=save_dir,
             device=device,
-            optimizer_cfg=optimizer_cfg or {},
-            # —— 直接明参传给 BaseTrainer —— 
+            optimizer_name=optimizer_name,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
             scheduler_name=scheduler_name,
             milestones=milestones,
             gamma=gamma,
@@ -306,10 +309,16 @@ class KptsTrainer(BaseTrainer):
         correct_counts, total_in_batch = pck_accuracy(pred_coords, gt_coords, img_size=self.img_size)
         mean_acc = np.mean(correct_counts / total_in_batch)
 
-        return {"acc": float(mean_acc)}
+        # 计算验证损失（与训练一致，用于主指标最小化）
+        out_list = [out_dict["heatmaps"], out_dict["centers"], out_dict["regs"], out_dict["offsets"]]
+        hm_loss, b_loss, c_loss, r_loss, o_loss = self.loss_func(out_list, labels, kps_mask)
+        total_loss = hm_loss + c_loss + r_loss + o_loss + b_loss
+
+        return {"loss": float(total_loss.item()), "acc": float(mean_acc)}
 
     def _get_main_metric(self, metrics: Dict[str, float]) -> float:
-        return metrics.get("acc", 0.0)
+        # 最小化验证损失
+        return metrics.get("loss", float("inf"))
 
     def _move_batch_to_device(self, batch):
         imgs, labels, kps_mask, img_names = batch
