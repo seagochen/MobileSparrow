@@ -6,8 +6,8 @@ deterministic: false        # 需要严格可复现就设 true（会稍慢）
 verbose: true               # （可选）若你的 trainer 支持
 
 # 可选：从断点继续或加载权重
-# resume: true
-# weights: outputs/ssdlite_coco/best.pt
+resume: true
+weights: outputs/ssdlite_coco/best.pt
 
 # -----------------------------
 # 模型（唯一处定义 anchors）
@@ -39,7 +39,7 @@ trainer:
       lr: 0.0003
       weight_decay: 0.05
 
-    # 学习率调度（沿用 BaseTrainer 的名字与参数）
+    # 学习率调度
     scheduler_name: MultiStepLR
     milestones: [120, 200, 260]
     gamma: 0.1

@@ -6,10 +6,12 @@ deterministic: false        # 需要严格可复现就设 true（会稍慢）
 verbose: true               # （可选）若你的 trainer 支持
 
 # 训练恢复 / 预加载
-# resume: true              # true=从 save_dir/last.pt 恢复；或者给具体路径
-# weights: outputs/movenet/best.pt  # 冷启动时可用预训练权重
+resume: true                # true=从 save_dir/last.pt 恢复；或者给具体路径
+weights: outputs/movenet/best.pt  # 冷启动时可用预训练权重
 
-# 模型（对齐你目录：sparrow/models/movenet.py）
+# -----------------------------
+# 模型
+# -----------------------------
 model:
   class: movenet            # alias -> sparrow.models.movenet.MoveNet
   args:
@@ -19,31 +21,27 @@ model:
     neck_outc: 96             # ← JSON（模型若需要就会吃到）
     head_midc: 48             # ← JSON（模型若需要就会吃到）
 
-# 训练器（对齐你目录：sparrow/task/kpts_trainer.py）
+
+# -----------------------------
+# 训练器
+# -----------------------------
 trainer:
   class: kpts_trainer
   args:
+    epochs: 200
     save_dir: output/movenet
-    epochs: 3
     img_size: 192
 
-    # 其它常用
-    target_stride: 4
-    num_joints: 17
-    device: cuda:0
-    log_interval: 10
-
-    # ---- 其它参数略 ----
+    # 优化器
     optimizer_cfg:
       name: adam
       lr: 0.00035
       weight_decay: 0.0001
 
-    # ---- 调度器：明参传入 ----
+    # 学习率调度
     scheduler_name: MultiStepLR
     milestones: [90, 130]
     gamma: 0.2
-
     # 可选：其它调度器用到的明参举例
     # step_size: 30         # StepLR
     # T_0: 10               # CosineAnnealingWarmRestarts
@@ -58,8 +56,12 @@ trainer:
     use_ema: true
     ema_decay: 0.9998
     clip_grad_norm: 1.0   # ← 注意别再用 clip_gradient
+    log_interval: 10
 
+
+# -----------------------------
 # 数据
+# -----------------------------
 data:
   train:
     builder: coco_kpts_dataloader      # alias -> sparrow.datasets.coco_kpts.create_kpts_dataloader
