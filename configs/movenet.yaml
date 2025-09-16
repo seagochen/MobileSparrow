@@ -46,7 +46,7 @@ trainer:
     # step_size: 30         # StepLR
     # T_0: 10               # CosineAnnealingWarmRestarts
     # T_mult: 2
-    # mode: max             # ReduceLROnPlateau
+    # mode: min             # ReduceLROnPlateau
     # factor: 0.5
     # patience: 5
     # min_lr: 1.0e-6

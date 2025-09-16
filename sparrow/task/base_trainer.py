@@ -75,7 +75,7 @@ class BaseTrainer:
 
         # --- 状态记录 ---
         os.makedirs(self.save_dir, exist_ok=True)
-        self.best_score = float("-inf")
+        self.best_score = float("inf")
         self.log_interval = log_interval
 
     def train(self, train_loader, val_loader):
@@ -198,7 +198,7 @@ class BaseTrainer:
         torch.save(checkpoint, os.path.join(self.save_dir, "last.pt"))
 
         # Save the best checkpoint if necessary
-        if score > self.best_score:
+        if score < self.best_score:
             self.best_score = score
 
             # Update the best score in the checkpoint for saving to 'best.pt'
