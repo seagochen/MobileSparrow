@@ -26,11 +26,12 @@ class SSDLite(nn.Module):
                  neck_outc: int = 96,              # 建议略大于关键点任务, 64/96/128 皆可
                  anchor_ratios: Tuple[float, ...] = (1.0, 2.0, 0.5),
                  anchor_scales: Tuple[float, ...] = (1.0, 1.26),  # 每层2个scale作为示例
+                 anchor_strides: Tuple[float, ...] = (8, 16, 32)
                  ):
         super().__init__()
         assert backbone in BACKBONES, f"unknown backbone: {backbone}"
         self.num_classes = int(num_classes)
-        self.strides = (8, 16, 32)  # <--- ⭐️ 在这里添加这一行
+        self.strides = anchor_strides
 
         # 1) Backbone
         self.backbone = BACKBONES[backbone](width_mult=width_mult)

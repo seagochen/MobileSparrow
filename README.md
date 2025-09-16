@@ -26,7 +26,7 @@ You can use `pip install -r requirements.txt` to install necessary packages for 
 
 ```bash
 pip install -r requirements.txt
-```
+````
 
 ---
 
@@ -92,7 +92,7 @@ python scripts/make_coco2017_for_ssdlite.py \
   --min-box-area 16
 ```
 
-> You may also keep all classes at data stage and restrict classes **at train time** via `task_params.class_filter` (e.g. `[1]` for person-only).
+> You may also keep all classes at data stage and restrict classes **at train time** via `task_params.class_filter` (e.g., `[1]` for person-only).
 
 Output:
 
@@ -255,6 +255,78 @@ python ssdlite_cli.py --config configs/ssdlite_config.json export-onnx \
 │   └── make_coco2017_for_ssdlite.py
 └── ssdlite_cli.py
 ```
+
 ## License
 
 MIT (see the badge link above)
+
+---
+
+## 6) Sparrow CLI (YAML-driven unified CLI)
+
+The `sparrow_cli.py` script provides a **unified CLI** for model training, evaluation, and export, all driven by **YAML configs**.
+It supports **resume-from-checkpoint**, **safe instantiation via aliases or file paths**, and **export to ONNX/TorchScript**.
+
+### Quickstart
+
+```bash
+# Train
+python sparrow_cli.py train -c configs/ssdlite.yaml
+
+# Eval
+python sparrow_cli.py eval -c configs/ssdlite.yaml --weights outputs/ssdlite_coco/best.pt
+
+# Export
+python sparrow_cli.py export -c configs/ssdlite.yaml \
+  --weights outputs/ssdlite_coco/best.pt \
+  --format onnx --output out/ssdlite.onnx --opset 13 --dynamic-batch
+```
+
+### YAML Example
+
+```yaml
+seed: 42
+deterministic: false
+
+model:
+  class: ssdlite
+  args:
+    num_classes: 81
+
+trainer:
+  class: dets_trainer
+  args:
+    epochs: 300
+    save_dir: outputs/ssdlite_coco
+
+data:
+  train:
+    builder: coco_dets_dataloader
+    args:
+      dataset_root: /path/to/coco
+      img_size: 320
+      batch_size: 64
+  val:
+    builder: coco_dets_dataloader
+    args:
+      dataset_root: /path/to/coco
+      img_size: 320
+      batch_size: 64
+```
+
+### Features
+
+* **Aliases** (`ssdlite`, `dets_trainer`, `coco_dets_dataloader`) or full paths/file URIs.
+* **Training flow**: seeding → build model/trainer → resume/weights → dataloaders → train → save last/best.
+* **Eval flow**: build model/trainer, load weights, run `evaluate()`.
+* **Export flow**: ONNX/TorchScript, optional wrapper, auto-filtered kwargs.
+* **CLI overrides**: `--set`, `--continue`, `--weights`, `--save-dir`, `--seed`.
+
+### Cheat Sheet
+
+* Change optimizer:
+  `--set trainer.args.optimizer_cfg.name=sgd --set trainer.args.optimizer_cfg.lr=0.01`
+* AMP training:
+  `--set trainer.args.use_amp=true`
+* Quick smoke test:
+  `--set trainer.args.epochs=5 --set data.train.args.batch_size=8`
