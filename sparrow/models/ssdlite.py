@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
 from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
-from sparrow.models.necks.fpn_lite_det import FPNLiteDet
+from sparrow.models.necks.fpn_lite_dets import FPNLiteDet
 from sparrow.models.heads.ssd_head import SSDLiteHead
 
 BACKBONES = {
