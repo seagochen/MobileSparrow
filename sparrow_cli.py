@@ -39,6 +39,8 @@ from typing import Any, Callable, Dict, Optional
 import torch
 import yaml
 
+from sparrow.utils.logger import logger
+
 # =========================================================
 # 别名映射（短名 -> 真正的可导入路径）
 # - 你可以在此处增删改别名，方便 YAML 用短名指向你的类/函数
@@ -142,21 +144,33 @@ def _import_from_file(path: str) -> types.ModuleType:
 
 def instantiate_with_filtered_kwargs(cls_or_fn: Callable[..., Any], kwargs: Dict[str, Any]) -> Any:
     """
-    安全实例化辅助：根据构造函数签名过滤掉 kwargs 中无用的键，避免“unexpected keyword argument”错误。
-
-    参数：
-      cls_or_fn: 目标类或函数（可调用）
-      kwargs (dict): 原始参数字典
-
-    返回：
-      实例对象或函数返回值（取决于 cls_or_fn ）
+    安全实例化辅助（增强版）：
+    - 先按签名过滤顶层键；
+    - 再“自动上浮一层”嵌套 dict 中与签名同名的键（便于 yaml 使用 ..._cfg 等分组）；
+      例如：kwargs = {scheduler_cfg: {name: MultiStepLR, milestones: [90,130], gamma: 0.2}}
+      若签名包含 (scheduler_name, milestones, gamma, ...)，则自动展开：
+        scheduler_name <- scheduler_cfg.name（别名映射）
+        milestones     <- scheduler_cfg.milestones
+        gamma          <- scheduler_cfg.gamma
+    - 支持常见别名：{name -> scheduler_name}
     """
     sig = inspect.signature(cls_or_fn)
     accepted = set(sig.parameters.keys())
-    filtered = {k: v for k, v in kwargs.items() if (k in accepted or any(
-        p.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
-        for p in sig.parameters.values()
-    ))}
+
+    # 复制一份，避免原 dict 被修改
+    flat = dict(kwargs)
+
+    # 将一层嵌套 dict 的同名字段上浮（不覆盖顶层已有值）
+    for k, v in list(flat.items()):
+        if isinstance(v, dict):
+            for sub_k, sub_v in v.items():
+                if sub_k in accepted and sub_k not in flat:
+                    flat[sub_k] = sub_v
+
+    # 常规过滤（若目标支持 *args/**kwargs 则不必过滤）
+    accepts_var = any(p.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+                      for p in sig.parameters.values())
+    filtered = flat if accepts_var else {k: v for k, v in flat.items() if k in accepted}
     return cls_or_fn(**filtered)
 
 
@@ -173,10 +187,19 @@ def maybe_instantiate(callable_or_obj: Any, kwargs: Optional[Dict[str, Any]] = N
       - 若构造函数不接受 kwargs 中的某些键，建议使用
         `instantiate_with_filtered_kwargs()` 先按签名过滤
     """
+
+    # 检擦输入是否正确
     if kwargs is None:
-        kwargs = {}
+        raise ValueError("kwargs cannot be None.")
+
+    if callable_or_obj is None:
+        raise ValueError("callable_or_obj cannot be None.")
+
+    # 当目标对象是类或者函数
     if inspect.isclass(callable_or_obj) or inspect.isfunction(callable_or_obj):
         return instantiate_with_filtered_kwargs(callable_or_obj, kwargs)
+
+    # 直接返回对象
     return callable_or_obj
 
 
@@ -270,22 +293,6 @@ def load_model_pt(model: Any, path: Optional[str] = None, strict: bool = True) -
     print(f"=> 已加载权重: {path}")
 
 
-def _derive_resume_path(cfg: Dict[str, Any], trainer_args: Dict[str, Any]) -> Optional[str]:
-    """
-    从配置推导 resume 路径：
-      - 若 cfg['resume'] 是 True，则尝试 save_dir/last.pt
-      - 若 cfg['resume'] 是字符串，则直接使用该路径
-    """
-    resume = cfg.get("resume", False)
-    if not resume:
-        return None
-    if isinstance(resume, str) and resume.strip():
-        return resume
-    save_dir = trainer_args.get("save_dir", "outputs/default_run")
-    last = os.path.join(save_dir, "last.pt")
-    return last if os.path.isfile(last) else None
-
-
 def save_last_and_best(trainer: Any, save_dir: str) -> None:
     """
     训练结束后的统一收尾：
@@ -293,14 +300,16 @@ def save_last_and_best(trainer: Any, save_dir: str) -> None:
       - 若能拿到“最佳”状态，则尝试保存/更新 best.pt
     """
     os.makedirs(save_dir, exist_ok=True)
+
+    # 保存 last.pt
     last_path = os.path.join(save_dir, "last.pt")
     try:
         # 若训练器提供了 state_dict 或模型/优化器等信息，自行组织
         torch.save({"model": getattr(trainer, "model", None).state_dict()
                     if hasattr(trainer, "model") else None}, last_path)
-        print(f"=> 已保存 last.pt 到: {last_path}")
+        logger.info("Saving Model", f"已保存 last.pt 到: {last_path}")
     except Exception as e:
-        print(f"[warn] 保存 last.pt 失败: {e}")
+        logger.warning("Saving Model", f"保存 last.pt 失败: {e}")
 
     # 简单的 best 兜底：若存在 best 属性，复制一份
     best_path = os.path.join(save_dir, "best.pt")
@@ -310,7 +319,7 @@ def save_last_and_best(trainer: Any, save_dir: str) -> None:
         # 这里不强制保存 best（多数训练器会在更优时覆盖 best.pt）
         pass
     except Exception as e:
-        print(f"[warn] 保存 best.pt 失败: {e}")
+        logger.warning("Saving Model", f"保存 best.pt 失败: {e}")
 
 
 # =========================================================
@@ -355,7 +364,6 @@ def cmd_train(cfg: Dict[str, Any]) -> None:
     deterministic: bool = bool(cfg.get("deterministic", False))
     verbose: bool = bool(cfg.get("verbose", True))
     resume_flag = cfg.get("resume", False)     # True / False / str 路径
-    weights_path = cfg.get("weights", None)    # 初始权重（不是断点）
 
     # 模型段
     model_cfg: Dict[str, Any] = cfg.get("model", {}) or {}
@@ -374,14 +382,8 @@ def cmd_train(cfg: Dict[str, Any]) -> None:
 
     # 优化器/调度/训练技巧（仅提取常见字段，剩余保持透传给 Trainer）
     optimizer_cfg: Dict[str, Any] = trainer_args.get("optimizer_cfg", {}) or {}
-    scheduler_name: str = trainer_args.get("scheduler_name", "MultiStepLR")
-    milestones = trainer_args.get("milestones", [120, 200, 260])
-    gamma: float = float(trainer_args.get("gamma", 0.1))
-    use_amp: bool = bool(trainer_args.get("use_amp", True))
-    use_ema: bool = bool(trainer_args.get("use_ema", True))
-    ema_decay: float = float(trainer_args.get("ema_decay", 0.9998))
-    clip_grad_norm: float = float(trainer_args.get("clip_grad_norm", 0.0))
-    log_interval: int = int(trainer_args.get("log_interval", 50))
+    scheduler_cfg: Dict[str, Any] = trainer_args.get("scheduler_cfg", {}) or {}
+    training_cfg: Dict[str, Any] = trainer_args.get("training_params", {}) or {}
 
     # 数据段（train/val 两个 dataloader）
     data_cfg: Dict[str, Any] = cfg.get("data", {}) or {}
@@ -393,20 +395,15 @@ def cmd_train(cfg: Dict[str, Any]) -> None:
     val_builder = val_loader_cfg.get("builder")
     val_args: Dict[str, Any] = val_loader_cfg.get("args", {}) or {}
 
-    # 由 resume_flag + save_dir 推导 resume 路径（若 resume_flag=True 则找 last.pt）
-    resume_path = _derive_resume_path(cfg, trainer_args)
-
     if verbose:
         print("[cmd_train] 提取的关键参数：")
         print("  seed/deterministic:", seed, deterministic)
-        print("  resume/weights:", resume_flag, weights_path)
         print("  model.class / args.keys:", model_class, list(model_args.keys()))
         print("  trainer.class / args.keys:", trainer_class, list(trainer_args.keys()))
         print("  epochs/save_dir/img_size:", epochs, save_dir, img_size)
         print("  optimizer_cfg:", optimizer_cfg)
-        print("  scheduler_name/milestones/gamma:", scheduler_name, milestones, gamma)
-        print("  use_amp/use_ema/ema_decay:", use_amp, use_ema, ema_decay)
-        print("  clip_grad_norm/log_interval:", clip_grad_norm, log_interval)
+        print("  scheduler_cfg:", scheduler_cfg)
+        print("  training_cfg:", training_cfg)
         print("  train_loader.builder / args.keys:", train_builder, list(train_args.keys()))
         print("  val_loader.builder   / args.keys:", val_builder,   list(val_args.keys()))
 
@@ -431,16 +428,18 @@ def cmd_train(cfg: Dict[str, Any]) -> None:
     # -------------------------
     # 4) 权重 / 断点恢复（resume 优先于 weights）
     # -------------------------
-    if resume_path and os.path.isfile(resume_path):
-        if hasattr(trainer, "resume"):
-            print(f"=> 从断点恢复: {resume_path}")
-            trainer.resume(resume_path)
-        else:
-            print(f"=> 加载模型权重(断点): {resume_path}")
-            load_model_pt(model, resume_path, strict=False)
-    elif weights_path:
-        print(f"=> 加载模型初始权重: {weights_path}")
+    if resume_flag:
+        best = os.path.join(save_dir, "best.pt")
+        last = os.path.join(save_dir, "last.pt")
+        weights_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else None)
+    else:
+        weights_path = None
+
+    # 加载权重
+    if weights_path:
         load_model_pt(model, weights_path, strict=False)
+    else:
+        logger.warning("Training", "未提供可用权重，将在随机初始化权重上开始训练")
 
     # -------------------------
     # 5) 构建数据（train / val），显式使用 builder / args
@@ -501,11 +500,9 @@ def cmd_eval(cfg: Dict[str, Any]) -> None:
     save_dir: str = trainer_args.get("save_dir", "outputs/default_run")
 
     # 权重优先顺序：CLI/YAML 的 weights -> save_dir/{best.pt,last.pt}
-    weights_path = cfg.get("weights", None)
-    if not weights_path:
-        best = os.path.join(save_dir, "best.pt")
-        last = os.path.join(save_dir, "last.pt")
-        weights_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else None)
+    best = os.path.join(save_dir, "best.pt")
+    last = os.path.join(save_dir, "last.pt")
+    weights_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else None)
 
     # 数据段（只需要 val）
     data_cfg: Dict[str, Any] = cfg.get("data", {}) or {}
@@ -518,7 +515,6 @@ def cmd_eval(cfg: Dict[str, Any]) -> None:
         print("  seed/deterministic:", seed, deterministic)
         print("  model.class / args.keys:", model_class, list(model_args.keys()))
         print("  trainer.class / args.keys:", trainer_class, list(trainer_args.keys()))
-        print("  save_dir/weights_path:", save_dir, weights_path)
         print("  val_loader.builder / args.keys:", val_builder, list(val_args.keys()))
 
     # -------------------------
@@ -545,7 +541,7 @@ def cmd_eval(cfg: Dict[str, Any]) -> None:
     if weights_path:
         load_model_pt(model, weights_path, strict=False)
     else:
-        print("[warn] 未提供可用权重，将在随机初始化权重上评估（仅用于烟测）")
+        logger.warning("Evaluation", "未提供可用权重，将在随机初始化权重上评估（仅用于烟测）")
 
     # -------------------------
     # 5) 构建 val_loader（显式使用 builder / args）
@@ -564,7 +560,7 @@ def cmd_eval(cfg: Dict[str, Any]) -> None:
         metrics = trainer.evaluate(val_loader)
         print("==> Eval metrics:", metrics)
     else:
-        print("[warn] 训练器不支持 evaluate()，仅做一次前向检查")
+        logger.warning("Evaluation", "训练器不支持 evaluate()，仅做一次前向检查")
         batch = next(iter(val_loader))
         if isinstance(batch, (tuple, list)) and hasattr(trainer, "_move_batch_to_device"):
             batch = trainer._move_batch_to_device(batch)  # type: ignore

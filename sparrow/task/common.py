@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Union
+from typing import Union, Literal
 
 import torch
 from torch import optim
@@ -16,7 +16,7 @@ def build_scheduler(
     milestones=None,
     gamma: float = 0.1,
     step_size: int = 30,
-    mode: str = "max",
+    mode: Literal["min", "max"] = "max",
     factor: float = 0.5,
     patience: int = 5,
     min_lr: float = 1e-6,
@@ -45,32 +45,21 @@ def build_scheduler(
 
     if n in ("reducelronplateau", "plateau", "default"):
         return optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode=str(mode), factor=float(factor),
+            optimizer, mode=mode, factor=float(factor),
             patience=int(patience), min_lr=float(min_lr)
         )
 
     raise ValueError(f"Unknown scheduler name: {name!r}")
 
 
-# def select_optimizer(optims: str, model, learning_rate: float, weight_decay: float):
-#     if optims == 'Adam':
-#         optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-#     elif optims == 'SGD':
-#         optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
-#     else:
-#         raise Exception("Unknown optimizer.")
-#     return optimizer
-def select_optimizer(name: str, params_or_model, lr: float, weight_decay: float = 0.0, **kw):
+def select_optimizer(name: str, model: torch.nn.Module, lr: float, weight_decay: float = 0.0, **kw):
     """
     兼容两种调用方式：
       - select_optimizer("adamw", model, lr=..., ...)            # 传 model，本函数内部取 .parameters()
       - select_optimizer("adamw", model.parameters(), lr=..., ...)  # 传 params，可迭代
     """
-    # 兼容 nn.Module / Iterable[Tensor]
-    if isinstance(params_or_model, torch.nn.Module):
-        params = params_or_model.parameters()
-    else:
-        params = params_or_model
+    # 获取模型参数
+    params = model.parameters()
 
     name = (name or "").lower()
     if name in ("adam",):

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Literal
 
 import torch
 import torch.nn as nn
@@ -73,9 +73,9 @@ class AnchorBuilder:
       或在分辨率切换时重建 AnchorBuilder。
 
     【典型用法（训练/验证）】
-    >>> out = model(images)  # 得到各层 [B, H_i*W_i*A, C] / [B, H_i*W_i*A, 4]
-    >>> anchors = anchor_builder.ensure(out["cls_logits"], stride_hints=model.strides, device=images.device)
-    >>> loss = ssdloss(out["cls_logits"], out["bbox_regs"], anchors, targets)
+    - out = model(images)  # 得到各层 [B, H_i*W_i*A, C] / [B, H_i*W_i*A, 4]
+    - anchors = anchor_builder.ensure(out["cls_logits"], stride_hints=model.strides, device=images.device)
+    - loss = ssdloss(out["cls_logits"], out["bbox_regs"], anchors, targets)
 
     【与其它模块的关系】
     - SSDLoss：依赖 anchors 进行 IoU 匹配、正负样本划分、回归编码/解码与 OHEM；
@@ -155,12 +155,16 @@ class DetsTrainer(BaseTrainer):
                  img_size: int,
                  # ---- 透传给 BaseTrainer 的通用参数 ----
                  device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-                 optimizer_cfg: Dict = None,
+                 # —— 优化器改为明参数 ——
+                 optimizer_name: str,
+                 learning_rate: float,
+                 weight_decay: float,
+                 # —— 调度器改为明参数 ——
                  scheduler_name: str = "MultiStepLR",
                  milestones=None,
                  gamma: float = 0.1,
                  step_size: int = 30,
-                 mode: str = "max",
+                 mode: Literal["min", "max"] = "min",
                  factor: float = 0.5,
                  patience: int = 5,
                  min_lr: float = 1e-6,
@@ -180,13 +184,25 @@ class DetsTrainer(BaseTrainer):
             epochs=epochs,
             save_dir=save_dir,
             device=device,
-            optimizer_cfg=optimizer_cfg or {},
+            optimizer_name=optimizer_name,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
             scheduler_name=scheduler_name,
-            milestones=milestones, gamma=gamma, step_size=step_size,
-            mode=mode, factor=factor, patience=patience, min_lr=min_lr,
-            T_0=T_0, T_mult=T_mult, last_epoch=last_epoch,
-            use_amp=use_amp, use_ema=use_ema, ema_decay=ema_decay,
-            clip_grad_norm=clip_grad_norm, log_interval=log_interval
+            milestones=milestones,
+            gamma=gamma,
+            step_size=step_size,
+            mode=mode,
+            factor=factor,
+            patience=patience,
+            min_lr=min_lr,
+            T_0=T_0,
+            T_mult=T_mult,
+            last_epoch=last_epoch,
+            use_amp=use_amp,
+            use_ema=use_ema,
+            ema_decay=ema_decay,
+            clip_grad_norm=clip_grad_norm,
+            log_interval=log_interval
         )
 
         # 任务维度
@@ -247,6 +263,5 @@ class DetsTrainer(BaseTrainer):
         return {"loss": float(loss.detach().cpu()), **{k: float(v) for k, v in ld.items()}}
 
     def _get_main_metric(self, metrics: Dict[str, float]) -> float:
-        # BaseTrainer 默认“越大越好”，我们采用 -loss 作为主指标  :contentReference[oaicite:4]{index=4}
-        # return -metrics.get("loss", float("inf"))
+        # 最小化验证损失作为主指标
         return metrics.get("loss", float("inf"))
