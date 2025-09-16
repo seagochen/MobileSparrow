@@ -1,5 +1,5 @@
 import torch.nn as nn
-from sparrow.models import conv_utils
+from sparrow.models.necks import conv_utils
 
 
 class FPNLiteKpts(nn.Module):
