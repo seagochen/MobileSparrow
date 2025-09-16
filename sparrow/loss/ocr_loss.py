@@ -5,7 +5,7 @@ from typing import List, Tuple, Dict, Union
 
 Tensor = torch.Tensor
 
-class DBLossLite(nn.Module):
+class DBLiteLoss(nn.Module):
     """
     Lightweight DB loss (probability-only by default).
     Inputs:
@@ -69,35 +69,7 @@ class DBLossLite(nn.Module):
         total = self.bce_ratio * bce + self.dice_ratio * dice + self.l1_ratio * l1
         return {"loss": total, "loss_bce": bce, "loss_dice": dice, "loss_l1": l1}
 
-
-def _pack_targets(
-    targets: List[Union[torch.Tensor, list, tuple]],
-    device: torch.device,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Flatten variable-length target sequences for CTC.
-    Args:
-        targets: list of int lists/tensors. Each element is a sequence WITHOUT blank ids.
-        device: destination device
-    Returns:
-        (targets_flat, target_lengths)
-    """
-    flat = []
-    lengths = []
-    for t in targets:
-        if isinstance(t, (list, tuple)):
-            ids = torch.tensor(t, dtype=torch.long, device=device)
-        elif isinstance(t, torch.Tensor):
-            ids = t.to(device=device, dtype=torch.long)
-        else:
-            raise TypeError(f"Invalid target type: {type(t)}")
-        lengths.append(int(ids.numel()))
-        flat.append(ids)
-    if len(flat) == 0:
-        raise ValueError("Empty targets list")
-    return torch.cat(flat, dim=0), torch.tensor(lengths, device=device, dtype=torch.long)
-
-
-class CTCLossWrapper(nn.Module):
+class CTCLoss(nn.Module):
     """Thin wrapper around nn.CTCLoss for (B,T,C) logits.
     - Expects raw logits (unnormalized), shape (B,T,K).
     - Computes log_softmax and transposes to (T,B,K) as required by PyTorch.
@@ -116,6 +88,34 @@ class CTCLossWrapper(nn.Module):
         device = logits.device
         logp = logits.log_softmax(dim=-1).permute(1, 0, 2).contiguous()  # (T,B,K)
         input_lengths = torch.full((B,), T, dtype=torch.long, device=device)
-        targets_flat, target_lengths = _pack_targets(targets, device)
+        targets_flat, target_lengths = self._pack_targets(targets, device)
         loss = self.ctc(logp, targets_flat, input_lengths, target_lengths)
         return {"loss": loss}
+
+    @staticmethod
+    def _pack_targets(
+        targets: List[Union[torch.Tensor, list, tuple]],
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Flatten variable-length target sequences for CTC.
+        Args:
+            targets: list of int lists/tensors. Each element is a sequence WITHOUT blank ids.
+            device: destination device
+        Returns:
+            (targets_flat, target_lengths)
+        """
+        flat = []
+        lengths = []
+        for t in targets:
+            if isinstance(t, (list, tuple)):
+                ids = torch.tensor(t, dtype=torch.long, device=device)
+            elif isinstance(t, torch.Tensor):
+                ids = t.to(device=device, dtype=torch.long)
+            else:
+                raise TypeError(f"Invalid target type: {type(t)}")
+            lengths.append(int(ids.numel()))
+            flat.append(ids)
+        if len(flat) == 0:
+            raise ValueError("Empty targets list")
+        return torch.cat(flat, dim=0), torch.tensor(lengths, device=device, dtype=torch.long)
+
