@@ -12,3 +12,5 @@ onnxruntime
 kaggle
 onnx
 nvitop
+pycocotools
+pyyaml

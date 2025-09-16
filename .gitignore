@@ -5,7 +5,7 @@ __pycache__
 *.bak
 *.onnx
 
-/core/__pycache__
+/sparrow/__pycache__
 output/
 output*/
 

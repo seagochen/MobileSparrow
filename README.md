@@ -2,21 +2,9 @@
 
 Lightweight human pose & object detection toolkit (MoveNet + SSDLite) for mobile/edge and server, built with PyTorch.
 
-
 [![license](https://img.shields.io/github/license/mashape/apistatus.svg?maxAge=2592000)](https://github.com/fire717/Fire/blob/main/LICENSE)
 
 Originally a MoveNet (17 keypoints) re-implementation, now extended to **MobileNet/ShuffleNet + FPN-Lite + SSDLite** for multi-object detection — all under a unified config/loader pipeline.
-
----
-
-## ✨ What’s New
-
-* **Modular model layout**: `backbone (MobileNetV2 / ShuffleNetV2)` + `neck (FPN-Lite)` + `head (MoveNet / SSDLite)`
-* **Unified config & loader**: one JSON toggles `"task": "kpts" | "det" | "cls"`; aligned data augmentations across tasks
-* **Lean data prep scripts**: keep **official COCO train/val splits** only (no random re-split); detection script supports class subset filtering
-* **Two CLIs**: `movenet_cli.py` (pose) and `ssdlite_cli.py` (detection) with `train / eval / predict / export-onnx`
-* **ONNX export (detection)**: export `cls_logits / bbox_regs / anchors` for portable post-processing (decode/NMS outside)
-* **Stability fixes**: lazy-built detection heads now auto-move to the right device; loss logging avoids `requires_grad` warnings
 
 ---
 
@@ -26,7 +14,7 @@ You can use `pip install -r requirements.txt` to install necessary packages for 
 
 ```bash
 pip install -r requirements.txt
-```
+````
 
 ---
 
@@ -66,7 +54,7 @@ python scripts/make_coco2017_for_movenet.py \
   --out-dir ./data/coco2017_movenet_sp \
   --splits train,val \
   --min-visible-kpts 8 \
-  --expand-ratio 1.0 \
+  --expand-ratio 1.4 \
   --jpeg-quality 95
 ```
 
@@ -92,65 +80,10 @@ python scripts/make_coco2017_for_ssdlite.py \
   --min-box-area 16
 ```
 
-> You may also keep all classes at data stage and restrict classes **at train time** via `task_params.class_filter` (e.g. `[1]` for person-only).
+> You may also keep all classes at data stage and restrict classes **at train time** via `task_params.class_filter` (e.g., `[1]` for person-only).
 
-Output:
-
-```
-data/coco2017_det_5cls/
-├── images/{train2017,val2017}/*.jpg
-└── annotations/{instances_train2017.json, instances_val2017.json}
-```
 
 ---
-
-## 3) Unified Config (one JSON for different tasks)
-
-```json
-{
-  "GPU_ID": "0",
-  "random_seed": 42,
-  "cfg_verbose": true,
-
-  "task": "kpts",                         // "kpts" | "det" | "cls"
-  "task_params": {
-    "num_joints": 17,                     // kpts only
-    "export_keypoints": true,             // kpts only
-    "class_agnostic_nms": false,          // det only (inference)
-    "class_filter": [],                   // det only (e.g., [1] => person-only; omit/[] => all)
-    "cls_mode": "single_label"            // cls (future use)
-  },
-
-  "save_dir": "output/",
-  "dataset_root_path": "./data/coco2017_movenet_sp",   // switch per task
-
-  "backbone": "mobilenet_v2",
-  "width_mult": 1.0,
-  "img_size": 256,
-  "target_stride": 4,                     // kpts only
-
-  "use_color_aug": true,
-  "use_flip": true,
-  "use_rotate": true,
-  "rotate_deg": 30.0,
-  "use_scale": true,
-  "scale_range": [0.75, 1.25],
-  "gaussian_radius": 2,                   // kpts only
-  "sigma_scale": 1.0,                     // kpts only
-  "select_person": "largest",             // kpts only
-
-  "pin_memory": true,
-  "num_workers": 8,
-  "batch_size": 64,
-  "epochs": 100,
-  "learning_rate": 0.00035,
-  "optimizer": "Adam",
-  "scheduler": "MultiStepLR-90,130-0.2",
-  "weight_decay": 0.0001,
-  "clip_gradient": 1.0,
-  "log_interval": 10
-}
-```
 
 **Notes**
 
@@ -161,47 +94,52 @@ data/coco2017_det_5cls/
 
 ## 4) Train / Eval / Predict / Export
 
-### 4.1 MoveNet CLI
+The `sparrow_cli.py` script provides a **unified CLI** for model training, evaluation, and export, all driven by **YAML configs**.
+It supports **resume-from-checkpoint**, **safe instantiation via aliases or file paths**, and **export to ONNX/TorchScript**.
 
 ```bash
-# train
-python movenet_cli.py --config configs/movenet_config.json train
+# Train
+python sparrow_cli.py train -c configs/ssdlite.yaml
 
-# eval (simple proxy metrics on val)
-python movenet_cli.py --config configs/movenet_config.json eval
+# Eval
+python sparrow_cli.py eval -c configs/ssdlite.yaml
 
-# predict a folder and visualize
-python movenet_cli.py --config configs/movenet_config.json predict --images ./demo --out ./vis_kpts
-
-# export ONNX (with keypoint outputs; dummy wrapper supported)
-python movenet_cli.py --config configs/movenet_config.json export-onnx --out output/movenet.onnx
+# Export
+python sparrow_cli.py export -c configs/ssdlite.yaml
 ```
 
-### 4.2 SSDLite CLI
+**YAML Example**
 
-```bash
-# train (set "task": "det" in config; point dataset_root_path to your detection subset)
-python ssdlite_cli.py --config configs/ssdlite_config.json train
+```yaml
+seed: 42
+deterministic: false
 
-# eval (simple proxy metrics on val)
-python ssdlite_cli.py --config configs/ssdlite_config.json eval --weights output/best.pt
+model:
+  class: ssdlite
+  args:
+    num_classes: 81
 
-# predict a folder and visualize
-python ssdlite_cli.py --config configs/ssdlite_config.json predict --images ./demo --out ./vis_det
+trainer:
+  class: dets_trainer
+  args:
+    epochs: 300
+    save_dir: outputs/ssdlite_coco
 
-# export ONNX (3 outputs)
-python ssdlite_cli.py --config configs/ssdlite_config.json export-onnx \
-  --out output/ssdlite.onnx --dynamic --verify
+data:
+  train:
+    builder: coco_dets_dataloader
+    args:
+      dataset_root: /path/to/coco
+      img_size: 320
+      batch_size: 64
+  val:
+    builder: coco_dets_dataloader
+    args:
+      dataset_root: /path/to/coco
+      img_size: 320
+      batch_size: 64
 ```
 
-**ONNX (detection - Planning)**
-
-* Outputs:
-
-  * `cls_logits`: `[B, N, C]` (includes background)
-  * `bbox_regs` : `[B, N, 4]` (anchor deltas)
-  * `anchors`   : `[N, 4]` (cx, cy, w, h in \[0, 1])
-* Do decode & NMS on the deployment side for better portability.
 
 ---
 
@@ -212,20 +150,18 @@ python ssdlite_cli.py --config configs/ssdlite_config.json export-onnx \
 ├── LICENSE
 ├── README.md
 ├── configs
-│   ├── classification_config.json
 │   ├── movenet_config.json
 │   └── ssdlite_config.json
 ├── core
 │   ├── datasets
-│   │   ├── coco_cls.py
-│   │   ├── coco_det.py
+│   │   ├── coco_dets.py
 │   │   ├── coco_kpts.py
 │   │   ├── coco_loader.py
 │   │   ├── common.py
 │   │   └── simple_loader.py
 │   ├── loss
 │   │   ├── movenet_loss.py
-│   │   └── ssd_loss.py
+│   │   └── ssdlite_loss.py
 │   ├── models
 │   │   ├── backbones
 │   │   │   ├── mobilenet_v2.py
@@ -233,17 +169,19 @@ python ssdlite_cli.py --config configs/ssdlite_config.json export-onnx \
 │   │   ├── heads
 │   │   │   ├── movenet_head.py
 │   │   │   └── ssd_head.py
-│   │   ├── movenet.py
 │   │   ├── necks
-│   │   │   └── fpn_lite.py
+│   │   │   ├── fpn_lite_dets.py
+│   │   │   └── fpn_lite_kpts.py
 │   │   ├── onnx
 │   │   │   ├── dummy_movenet.py
 │   │   │   └── dummy_ssdlite.py
+│   │   ├── movenet.py
 │   │   └── ssdlite.py
 │   ├── task
-│   │   ├── task_det.py
+│   │   ├── task_dets.py
 │   │   └── task_kpts.py
 │   └── utils
+│       ├── logger.py
 │       └── paths.py
 ├── movenet_cli.py
 ├── output
@@ -255,6 +193,7 @@ python ssdlite_cli.py --config configs/ssdlite_config.json export-onnx \
 │   └── make_coco2017_for_ssdlite.py
 └── ssdlite_cli.py
 ```
+
 ## License
 
 MIT (see the badge link above)

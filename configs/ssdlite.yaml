@@ -1,0 +1,85 @@
+# configs/ssdlite.yaml
+
+# 复现/日志
+seed: 42
+deterministic: false        # 需要严格可复现就设 true（会稍慢）
+verbose: true               # （可选）若你的 trainer 支持
+
+# 可选：从断点继续或加载权重
+resume: true
+weights: outputs/ssdlite_coco/best.pt
+
+# -----------------------------
+# 模型（唯一处定义 anchors）
+# -----------------------------
+model:
+  class: ssdlite                # -> sparrow.models.ssdlite.SSDLite
+  args:
+    num_classes: 81             # COCO: 80 + 背景1
+    backbone: mobilenet_v2      # 或 shufflenet_v2
+    width_mult: 1.0
+    neck_outc: 96
+    anchor_ratios: [1.0, 2.0, 0.5]
+    anchor_scales: [1.0, 1.26]
+    anchor_strides: [8, 16, 32]
+
+# -----------------------------
+# 训练器（不再配置 anchors）
+# -----------------------------
+trainer:
+  class: dets_trainer           # -> sparrow.task.dets_trainer.DetsTrainer
+  args:
+    epochs: 300
+    save_dir: output/ssdlite_coco
+    img_size: 320
+
+    # 优化器
+    optimizer_cfg:
+      name: adamw               # 也可用 adam / sgd（取决于 common.select_optimizer 支持）
+      lr: 0.0003
+      weight_decay: 0.05
+
+    # 学习率调度
+    scheduler_name: MultiStepLR
+    milestones: [120, 200, 260]
+    gamma: 0.1
+
+    # 训练技巧
+    use_amp: true
+    use_ema: true
+    ema_decay: 0.9998
+    clip_grad_norm: 5.0
+    log_interval: 50
+
+    # 损失参数
+    alpha_reg: 1.0
+    neg_pos_ratio: 3
+
+# -----------------------------
+# 数据
+# -----------------------------
+data:
+  train:
+    builder: coco_dets_dataloader    # -> sparrow.datasets.coco_dets.create_det_dataloader
+    args:
+      dataset_root: ./data/coco2017_ssdlite    # << 改成你的 COCO 根目录
+      img_size: 320
+      batch_size: 64
+      num_workers: 8
+      pin_memory: true
+      is_train: true
+      aug_cfg:
+        rotate_deg: 15.0
+        scale_range: [0.75, 1.25]
+        min_box_size: 2.0
+
+  val:
+    builder: coco_dets_dataloader
+    args:
+      dataset_root: ./data/coco2017_ssdlite
+      img_size: 320
+      batch_size: 64
+      num_workers: 8
+      pin_memory: true
+      is_train: false
+      aug_cfg: {}
