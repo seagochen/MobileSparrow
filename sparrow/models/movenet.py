@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
+from sparrow.models.backbones.mobilenet_v3 import MobileNetV3Backbone
 from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
 from sparrow.models.necks.fpn_lite_kpts import FPNLiteKpts
 from sparrow.models.heads.movenet_head import MoveNetHead
@@ -12,6 +13,7 @@ from sparrow.models.heads.movenet_head import MoveNetHead
 BACKBONES = {
     "mobilenet_v2": MobileNetV2Backbone,
     "shufflenet_v2": ShuffleNetV2Backbone,
+    "mobilenet_v3": MobileNetV3Backbone,
 }
 
 class MoveNet(nn.Module):

@@ -22,6 +22,16 @@ model:
     anchor_scales: [1.0, 1.26]
     anchor_strides: [8, 16, 32]
 
+  # class: ssdlite
+  # args:
+  #   backbone: mobilenet_v3
+  #   width_mult: 1.0
+  #   num_classes: 80
+  #   neck_outc: 96
+  #   anchor_ratios: [1.0, 2.0, 0.5]
+  #   anchor_scales: [1.0, 1.26]
+  #   anchor_strides: [8, 16, 32]
+
 # -----------------------------
 # 训练器（不再配置 anchors）
 # -----------------------------

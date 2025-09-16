@@ -20,6 +20,13 @@ model:
     neck_outc: 96             # ← JSON（模型若需要就会吃到）
     head_midc: 48             # ← JSON（模型若需要就会吃到）
 
+  # class: movenet
+  # args:
+  #   backbone: mobilenet_v3
+  #   width_mult: 1.0
+  #   num_joints: 17
+  #   neck_outc: 64
+  #   head_midc: 32
 
 # -----------------------------
 # 训练器
