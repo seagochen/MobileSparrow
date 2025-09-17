@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 class DummyMoveNet(nn.Module):
     """
-    Wrap MoveNet(dict outputs) -> [B, 51]  (17 joints × (x, y, score))
+    Wrap MoveNet(dict outputs) -> [B, 17 x 3]  (#joints X (x, y, score))
     只使用 ONNX 友好的张量算子（无 numpy / python float 参与计算图）。
     """
     def __init__(self, movenet: nn.Module,
@@ -112,5 +112,5 @@ class DummyMoveNet(nn.Module):
             out_list.extend([x_norm, y_norm, score])
 
         # 6) 拼成 [B, 3*J]
-        out = torch.cat(out_list, dim=1)
+        out = torch.cat(out_list, dim=1)   # [B, 3*J]，序列是 x1,y1,s1,x2,y2,s2,...
         return out

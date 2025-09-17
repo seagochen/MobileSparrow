@@ -101,15 +101,18 @@ data:
 # -----------------------------
 export:
   format: onnx
-  output: output/movenet/movenet.onnx
+  output: output/ssdlite/ssdlite.onnx
   opset: 13
-  wrapper:
-    class: dummy_movenet               # alias -> sparrow.models.onnx.dummy_movenet.DummyMoveNet
-    args:
-      num_joints: 17
-      img_size: 192
-      target_stride: 4
-      export_keypoints: true           # ← 若 wrapper 支持可传入（对应 JSON 的 export_keypoints）
   input:
-    shape: [1, 3, 192, 192]
-    dtype: float32
+    shape: [1, 3, 320, 320]  # 保证被 strides 整除
+  wrapper:
+    class: dummy_ssdlite
+    args:
+      num_classes: 80
+      img_size: 320
+      ratios: [1.0, 2.0, 0.5]
+      scales: [1.0, 1.26]
+      strides: [8, 16, 32]
+      return_normalized: false
+      drop_background: true
+      variances: [0.1, 0.1, 0.2, 0.2]
