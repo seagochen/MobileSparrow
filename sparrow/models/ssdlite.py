@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 
 from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
+from sparrow.models.backbones.mobilenet_v3 import MobileNetV3Backbone
 from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
 from sparrow.models.necks.fpn_lite_dets import FPNLiteDet
 from sparrow.models.heads.ssd_head import SSDLiteHead
@@ -10,6 +11,7 @@ from sparrow.models.heads.ssd_head import SSDLiteHead
 BACKBONES = {
     "mobilenet_v2": MobileNetV2Backbone,
     "shufflenet_v2": ShuffleNetV2Backbone,
+    "mobilenet_v3": MobileNetV3Backbone,
 }
 
 class SSDLite(nn.Module):

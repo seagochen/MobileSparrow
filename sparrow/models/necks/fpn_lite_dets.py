@@ -1,7 +1,8 @@
 # 新文件（或放回 fpn_lite.py 中另起一个类）：fpn_lite_det.py
 import torch.nn as nn
 import torch.nn.functional as F
-from sparrow.models import conv_utils
+from sparrow.models.necks import conv_utils
+
 
 class FPNLiteDet(nn.Module):
     """

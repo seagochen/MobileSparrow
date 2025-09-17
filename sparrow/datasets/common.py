@@ -1,20 +1,21 @@
-from typing import List, Tuple
+from typing import Tuple
 
 import cv2
 import numpy as np
 
 
-def gaussian2d(shape: Tuple[int, int], sigma: float) -> np.ndarray:
-    h, w = shape
-    y = np.arange(0, h, 1, dtype=np.float32)
-    x = np.arange(0, w, 1, dtype=np.float32)
-    yy, xx = np.meshgrid(y, x, indexing="ij")
-    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
-    g = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma ** 2))
-    return g
-
 def draw_gaussian(heatmap: np.ndarray, center: Tuple[int, int], radius: int, k: float = 1.0):
     """在 heatmap 上画带裁剪的高斯核。heatmap: H×W；center: (x, y)"""
+
+    def gaussian2d(shape: Tuple[int, int], sigma: float) -> np.ndarray:
+        h, w = shape
+        y = np.arange(0, h, 1, dtype=np.float32)
+        x = np.arange(0, w, 1, dtype=np.float32)
+        yy, xx = np.meshgrid(y, x, indexing="ij")
+        cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+        g = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma ** 2))
+        return g
+
     diameter = 2 * radius + 1
     gaussian = gaussian2d((diameter, diameter), sigma=diameter / 6.0)
 
@@ -30,6 +31,17 @@ def draw_gaussian(heatmap: np.ndarray, center: Tuple[int, int], radius: int, k: 
     masked_hm = heatmap[y - top:y + bottom, x - left:x + right]
     masked_g = gaussian[radius - top:radius + bottom, radius - left:radius + right]
     np.maximum(masked_hm, masked_g * k, out=masked_hm)
+
+def get_center_from_kps(kps_xyv: np.ndarray) -> Tuple[float, float]:
+    """kps_xyv: [17,3]，只用 v>0 的点做均值"""
+    vis = kps_xyv[:, 2] > 0
+    if vis.sum() == 0:
+        cx = kps_xyv[:, 0].mean()
+        cy = kps_xyv[:, 1].mean()
+    else:
+        cx = kps_xyv[vis, 0].mean()
+        cy = kps_xyv[vis, 1].mean()
+    return float(cx), float(cy)
 
 def letterbox(img: np.ndarray, dst_size: int, color=(114, 114, 114)) -> Tuple[np.ndarray, float, Tuple[int, int]]:
     """
@@ -67,18 +79,3 @@ def random_affine_points(pts: np.ndarray, M: np.ndarray) -> np.ndarray:
     pts_aug = np.concatenate([pts, ones], axis=1)  # [N,3]
     pts_new = (M @ pts_aug.T).T  # [N,2]
     return pts_new
-
-def bbox_area(bbox: List[float]) -> float:
-    x1, y1, w, h = bbox
-    return max(0.0, w) * max(0.0, h)
-
-def get_center_from_kps(kps_xyv: np.ndarray) -> Tuple[float, float]:
-    """kps_xyv: [17,3]，只用 v>0 的点做均值"""
-    vis = kps_xyv[:, 2] > 0
-    if vis.sum() == 0:
-        cx = kps_xyv[:, 0].mean()
-        cy = kps_xyv[:, 1].mean()
-    else:
-        cx = kps_xyv[vis, 0].mean()
-        cy = kps_xyv[vis, 1].mean()
-    return float(cx), float(cy)
