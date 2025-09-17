@@ -6,6 +6,7 @@ from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
 from sparrow.models.backbones.mobilenet_v3 import MobileNetV3Backbone
 from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
 
+
 BACKBONES = {
     "mobilenet_v2": MobileNetV2Backbone,
     "mobilenet_v3": MobileNetV3Backbone,
@@ -158,11 +159,9 @@ class SequenceNeck1D(nn.Module):
     def __init__(self, in_ch: int, mid_ch: int = 128, out_ch: int = 256):
         super().__init__()
         self.conv = nn.Sequential(
-            # 等价于 conv_utils.conv3x3(in_ch, mid_ch)
             nn.Conv2d(in_ch, mid_ch, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(mid_ch),
             nn.ReLU(inplace=True),
-            # 等价于 conv_utils.conv1x1(mid_ch, out_ch)
             nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
@@ -170,8 +169,15 @@ class SequenceNeck1D(nn.Module):
 
     def forward(self, x):  # x: (B,C,H,W)
         x = self.conv(x)
+
+        # Pytorch新版本：自适应池化
         x = F.adaptive_avg_pool2d(x, (1, None))   # (B,C,1,W')
         x = x.squeeze(2).permute(0, 2, 1).contiguous()  # (B,T,C)
+        # 旧版本采用以下写法兼容写法
+        # x = self.conv(x)
+        # x = x.mean(dim=2, keepdim=True)  # 等价于把 H 压到 1
+        # x = x.squeeze(2).permute(0, 2, 1).contiguous()
+
         return x
 
 

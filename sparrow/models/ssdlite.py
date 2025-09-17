@@ -8,6 +8,7 @@ from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
 from sparrow.models.backbones.mobilenet_v3 import MobileNetV3Backbone
 from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
 
+
 BACKBONES = {
     "mobilenet_v2": MobileNetV2Backbone,
     "shufflenet_v2": ShuffleNetV2Backbone,

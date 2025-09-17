@@ -1,11 +1,11 @@
-# reid_lite.py
+# reidlite.py
 import torch.nn as nn
 import torch.nn.functional as F
 
 from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
-# 按需更换这三行的导入路径
 from sparrow.models.backbones.mobilenet_v3 import MobileNetV3Backbone
 from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
+
 
 BACKBONES = {
     "mobilenet_v2": MobileNetV2Backbone,
@@ -13,13 +13,14 @@ BACKBONES = {
     "mobilenet_v3": MobileNetV3Backbone,
 }
 
+
 class ReIDLite(nn.Module):
     """
     输入: Bx3x256x128 (HxW=256x128的人框裁剪)
     输出: Bx128   (L2-normalized embedding)
     训练: 你可以额外加一个 classifier head 做 ArcFace / CE；推理时只用 embedding。
     """
-    def __init__(self, backbone='mobilenetv3', width_mult=0.5, emb_dim=128, freeze_stem=True):
+    def __init__(self, backbone='mobilenet_v3', width_mult=0.5, emb_dim=128, freeze_stem=True):
         super().__init__()
 
         assert backbone in BACKBONES, f"unknown backbone: {backbone}"
@@ -32,7 +33,8 @@ class ReIDLite(nn.Module):
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.neck = BNNeck(c5, emb_dim)
 
-        if freeze_stem:
+        # 为防止backbone不包含stem
+        if freeze_stem and hasattr(self.backbone, "stem"):
             for p in self.backbone.stem.parameters(): p.requires_grad = False
 
     def forward(self, x):
