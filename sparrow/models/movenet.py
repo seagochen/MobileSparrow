@@ -2,12 +2,11 @@ from typing import Dict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
 from sparrow.models.backbones.mobilenet_v3 import MobileNetV3Backbone
 from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
-from sparrow.models.necks.fpn_lite_kpts import FPNLiteKpts
-from sparrow.models.heads.movenet_head import MoveNetHead
 
 
 BACKBONES = {
@@ -15,6 +14,7 @@ BACKBONES = {
     "shufflenet_v2": ShuffleNetV2Backbone,
     "mobilenet_v3": MobileNetV3Backbone,
 }
+
 
 class MoveNet(nn.Module):
     def __init__(self,
@@ -31,7 +31,7 @@ class MoveNet(nn.Module):
 
         # 2) 动态获取 C3/C4/C5 通道，配置 FPN
         c3c, c4c, c5c = self.backbone.get_out_channels()
-        self.neck = FPNLiteKpts(c3=c3c, c4=c4c, c5=c5c, outc=neck_outc)
+        self.neck = FPNLite(c3=c3c, c4=c4c, c5=c5c, outc=neck_outc)
 
         # 3) 头部
         self.head = MoveNetHead(neck_outc, num_joints=num_joints, midc=head_midc)
@@ -48,14 +48,93 @@ class MoveNet(nn.Module):
         return self.head(p3)
 
 
-if __name__ == "__main__":
-    m = MoveNet(backbone="mobilenet_v2", num_joints=17, width_mult=1.0).eval()
-    x = torch.randn(1,3,192,192)
+class MoveNetHead(nn.Module):
+    """
+    四头输出：heatmaps / centers / regs / offsets
+    """
+    def __init__(self, in_ch, num_joints=17, midc=32):
+        super().__init__()
 
-    # 执行推论
-    with torch.no_grad():
-        y = m(x)
+        self.hm = nn.Sequential(
+            nn.Conv2d(in_ch, midc, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(midc, num_joints, 1), nn.Sigmoid()
+        )
+        self.ct = nn.Sequential(
+            nn.Conv2d(in_ch, midc, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(midc, 1, 1), nn.Sigmoid()
+        )
+        self.reg = nn.Sequential(
+            nn.Conv2d(in_ch, midc, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(midc, num_joints * 2, 1)   # (dx, dy)
+        )
+        self.off = nn.Sequential(
+            nn.Conv2d(in_ch, midc, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(midc, num_joints * 2, 1)   # (ox, oy)
+        )
 
-    # 输出并查看4头的形状
-    for k,v in y.items():
-        print(k, v.shape)
+    def forward(self, x):
+        return {
+            "heatmaps": self.hm(x),     # B×17×48×48,
+            "centers":  self.ct(x),     # B×1 ×48×48,
+            "regs":     self.reg(x),    # B×34×48×48,
+            "offsets":  self.off(x),    # B×34×48×48
+        }
+
+
+class FPNLite(nn.Module):
+    """
+    接收 (C3, C4, C5) -> 输出单尺度 P3（或多尺度列表，按需改）
+    这里直接用 nn.Sequential 定义 1x1 与 3x3 conv 块（Conv + BN + ReLU）。
+    """
+
+    def __init__(self, c3, c4, c5, outc=64):
+        super().__init__()
+        # 1x1 conv blocks
+        self.l3 = nn.Sequential(
+            nn.Conv2d(c3, outc, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(outc),
+            nn.ReLU(inplace=True)
+        )
+        self.l4 = nn.Sequential(
+            nn.Conv2d(c4, outc, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(outc),
+            nn.ReLU(inplace=True)
+        )
+        self.l5 = nn.Sequential(
+            nn.Conv2d(c5, outc, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(outc),
+            nn.ReLU(inplace=True)
+        )
+
+        # 3x3 conv blocks
+        self.smooth4 = nn.Sequential(
+            nn.Conv2d(outc, outc, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(outc),
+            nn.ReLU(inplace=True)
+        )
+        self.smooth3 = nn.Sequential(
+            nn.Conv2d(outc, outc, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(outc),
+            nn.ReLU(inplace=True)
+        )
+
+        # 上采样后的最终平滑层
+        self.final_smooth = nn.Sequential(
+            nn.Conv2d(outc, outc, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(outc),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, c3, c4, c5):
+        p5 = self.l5(c5)
+        p4 = self.l4(c4) + F.interpolate(p5, size=c4.shape[-2:], mode="nearest")
+        p4 = self.smooth4(p4)
+
+        p3 = self.l3(c3) + F.interpolate(p4, size=c3.shape[-2:], mode="nearest")
+        p3 = self.smooth3(p3)
+
+        p3_upsampled = F.interpolate(p3, scale_factor=2.0, mode='bilinear', align_corners=False)
+        p3_final = self.final_smooth(p3_upsampled)
+        return p3_final
+
+

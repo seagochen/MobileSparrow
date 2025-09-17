@@ -12,7 +12,7 @@ resume: true
 # 模型（唯一处定义 anchors）
 # -----------------------------
 model:
-  class: ssdlite                # -> sparrow.models.ssdlite.SSDLite
+  class: ssdlite               # -> sparrow.models.ssdlite.SSDLite
   args:
     num_classes: 81             # COCO: 80 + 背景1
     backbone: mobilenet_v2      # 或 shufflenet_v2

@@ -12,7 +12,7 @@ resume: true
 # 模型
 # -----------------------------
 model:
-  class: movenet            # alias -> sparrow.models.movenet.MoveNet
+  class: movenet             # alias -> sparrow.models.movenet.movenet
   args:
     backbone: shufflenet_v2   # ← 从 JSON 的 shufflenet_v2
     width_mult: 1.5           # ← JSON
