@@ -500,9 +500,11 @@ def cmd_eval(cfg: Dict[str, Any]) -> None:
     save_dir: str = trainer_args.get("save_dir", "outputs/default_run")
 
     # 权重优先顺序：CLI/YAML 的 weights -> save_dir/{best.pt,last.pt}
-    best = os.path.join(save_dir, "best.pt")
-    last = os.path.join(save_dir, "last.pt")
-    weights_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else None)
+    weights_path = cfg.get("weights", None)
+    if not weights_path:
+        best = os.path.join(save_dir, "best.pt")
+        last = os.path.join(save_dir, "last.pt")
+        weights_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else None)
 
     # 数据段（只需要 val）
     data_cfg: Dict[str, Any] = cfg.get("data", {}) or {}
@@ -683,8 +685,8 @@ def build_argparser() -> argparse.ArgumentParser:
         sp.add_argument("-c", "--config", required=True, help="YAML 配置文件路径")
         sp.add_argument("--set", dest="overrides", nargs="*", default=[],
                         help="临时覆盖配置，格式：--set a.b.c=val x.y=2")
-        # sp.add_argument("--save-dir", default="", help="覆盖 trainer.args.save_dir")
         sp.add_argument("--weights", default="", help="权重文件路径（优先级高于 YAML 中的 weights）")
+        # sp.add_argument("--save-dir", default="", help="覆盖 trainer.args.save_dir")
         # sp.add_argument("--continue", dest="cont", action="store_true", help="从 save_dir/last.pt 断点继续")
 
     # train
@@ -714,17 +716,9 @@ def _apply_cli_to_cfg(cfg: Dict[str, Any], args: argparse.Namespace) -> None:
     将常见的 CLI 选项回写到 YAML 配置中（统一下游逻辑）。
     优先级：CLI > YAML
     """
-    # 顶层覆盖
-    if args.cont:
-        cfg["resume"] = True
-    if args.weights:
+    
+    if getattr(args, "weights", ""):
         cfg["weights"] = args.weights
-
-    # 覆盖 save_dir
-    if args.save_dir:
-        trainer = cfg.setdefault("trainer", {})
-        targs = trainer.setdefault("args", {})
-        targs["save_dir"] = args.save_dir
 
     # 导出子命令的附加覆盖
     if args.cmd == "export":
