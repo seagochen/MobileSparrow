@@ -414,33 +414,32 @@ def cmd_train(cfg: Dict[str, Any]) -> None:
     set_seed_and_deterministic(seed, deterministic)
 
     # -------------------------
-    # 3) 构建模型与训练器（显式使用 model_class / model_args）
+    # 3) 先构建模型（稍后再构建训练器）
     # -------------------------
     if not model_class:
         raise ValueError("model.class 为空，请在 YAML 中配置 model.class")
     model_ctor = resolve_callable(model_class)
     model = maybe_instantiate(model_ctor, model_args)
 
+    # -------------------------
+    # 4) 权重 / 断点恢复（仅当 YAML 顶层 resume: true 时触发）
+    # -------------------------
+    weights_path = None
+    if resume_flag:
+        last = os.path.join(save_dir, "last.pt")
+        best = os.path.join(save_dir, "best.pt")
+        weights_path = last if os.path.isfile(last) else (best if os.path.isfile(best) else None)
+
+    if weights_path:
+        load_model_pt(model, weights_path, strict=False)
+    else:
+        logger.warning("cmd_train", "Cannot find the weights file, start the training from scratch.")
+
+    # 现在再构建训练器，确保优化器/EMA等基于已加载权重初始化
     if not trainer_class:
         raise ValueError("trainer.class 为空，请在 YAML 中配置 trainer.class")
     train_ctor = resolve_callable(trainer_class)
     trainer = maybe_instantiate(train_ctor, {**trainer_args, "model": model})
-
-    # -------------------------
-    # 4) 权重 / 断点恢复（resume 优先于 weights）
-    # -------------------------
-    if resume_flag:
-        best = os.path.join(save_dir, "best.pt")
-        last = os.path.join(save_dir, "last.pt")
-        weights_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else None)
-    else:
-        weights_path = None
-
-    # 加载权重
-    if weights_path:
-        load_model_pt(model, weights_path, strict=False)
-    else:
-        logger.warning("cmd_train", "未提供可用权重，将在随机初始化权重上开始训练")
 
     # -------------------------
     # 5) 构建数据（train / val），显式使用 builder / args
@@ -684,9 +683,9 @@ def build_argparser() -> argparse.ArgumentParser:
         sp.add_argument("-c", "--config", required=True, help="YAML 配置文件路径")
         sp.add_argument("--set", dest="overrides", nargs="*", default=[],
                         help="临时覆盖配置，格式：--set a.b.c=val x.y=2")
-        sp.add_argument("--save-dir", default="", help="覆盖 trainer.args.save_dir")
+        # sp.add_argument("--save-dir", default="", help="覆盖 trainer.args.save_dir")
         sp.add_argument("--weights", default="", help="权重文件路径（优先级高于 YAML 中的 weights）")
-        sp.add_argument("--continue", dest="cont", action="store_true", help="从 save_dir/last.pt 断点继续")
+        # sp.add_argument("--continue", dest="cont", action="store_true", help="从 save_dir/last.pt 断点继续")
 
     # train
     sp_train = sub.add_parser("train", help="训练")
