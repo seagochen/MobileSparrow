@@ -15,7 +15,7 @@ model:
   class: movenet              # alias -> sparrow.models.movenet.movenet
   args:
     backbone: mobilenet_v2
-    width_mult: 1.5
+    width_mult: 1.0           # 在嵌入式环境中，选择width_mult 1.0比较合适，如果资源足够，可以适当调高一些
     num_joints: 17
     neck_outc: 96
     head_midc: 48
