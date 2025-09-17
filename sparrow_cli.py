@@ -290,7 +290,8 @@ def load_model_pt(model: Any, path: Optional[str] = None, strict: bool = True) -
     else:
         raise ValueError("ckpt file is failed to load.")
 
-    print(f"=> 已加载权重: {path}")
+    # 重みファイルを読み込む
+    logger.info("load_model_pt", f"The weights file is loaded: {path}")
 
 
 def save_last_and_best(trainer: Any, save_dir: str) -> None:
@@ -307,9 +308,9 @@ def save_last_and_best(trainer: Any, save_dir: str) -> None:
         # 若训练器提供了 state_dict 或模型/优化器等信息，自行组织
         torch.save({"model": getattr(trainer, "model", None).state_dict()
                     if hasattr(trainer, "model") else None}, last_path)
-        logger.info("Saving Model", f"已保存 last.pt 到: {last_path}")
+        logger.info("save_last_and_best", f"已保存 last.pt 到: {last_path}")
     except Exception as e:
-        logger.warning("Saving Model", f"保存 last.pt 失败: {e}")
+        logger.warning("save_last_and_best", f"保存 last.pt 失败: {e}")
 
     # 简单的 best 兜底：若存在 best 属性，复制一份
     best_path = os.path.join(save_dir, "best.pt")
@@ -319,7 +320,7 @@ def save_last_and_best(trainer: Any, save_dir: str) -> None:
         # 这里不强制保存 best（多数训练器会在更优时覆盖 best.pt）
         pass
     except Exception as e:
-        logger.warning("Saving Model", f"保存 best.pt 失败: {e}")
+        logger.warning("save_last_and_best", f"保存 best.pt 失败: {e}")
 
 
 # =========================================================
@@ -439,7 +440,7 @@ def cmd_train(cfg: Dict[str, Any]) -> None:
     if weights_path:
         load_model_pt(model, weights_path, strict=False)
     else:
-        logger.warning("Training", "未提供可用权重，将在随机初始化权重上开始训练")
+        logger.warning("cmd_train", "未提供可用权重，将在随机初始化权重上开始训练")
 
     # -------------------------
     # 5) 构建数据（train / val），显式使用 builder / args
@@ -541,7 +542,9 @@ def cmd_eval(cfg: Dict[str, Any]) -> None:
     if weights_path:
         load_model_pt(model, weights_path, strict=False)
     else:
-        logger.warning("Evaluation", "未提供可用权重，将在随机初始化权重上评估（仅用于烟测）")
+        logger.warning("cmd_eval", "No available weights are provided, "
+                                   "evaluation will be performed on randomly "
+                                   "initialized weights (for smoke testing only)")
 
     # -------------------------
     # 5) 构建 val_loader（显式使用 builder / args）
@@ -560,10 +563,10 @@ def cmd_eval(cfg: Dict[str, Any]) -> None:
         metrics = trainer.evaluate(val_loader)
         print("==> Eval metrics:", metrics)
     else:
-        logger.warning("Evaluation", "训练器不支持 evaluate()，仅做一次前向检查")
+        logger.warning("cmd_eval", "The trainer does not support evaluate() and only does a forward check.")
         batch = next(iter(val_loader))
         if isinstance(batch, (tuple, list)) and hasattr(trainer, "_move_batch_to_device"):
-            batch = trainer._move_batch_to_device(batch)  # type: ignore
+            batch = trainer.move_batch_to_device(batch)
             model.eval()
             with torch.no_grad():
                 out = model(batch[0])  # 假设第一个是 imgs

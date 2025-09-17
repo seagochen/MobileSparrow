@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import gc
 import os
-from typing import Dict, Tuple, Literal
+from typing import Dict, Tuple, Literal, Any
 
 import torch
 from torch import optim
@@ -158,6 +158,9 @@ class BaseTrainer:
             self._update_meters(meters, metrics_dict, batch_size=next(iter(batch)).shape[0])
         return self._get_mean_meters(meters)
 
+    def move_batch_to_device(self, batch):
+        self._move_batch_to_device(batch)
+
     # --- 需要子类实现的抽象方法 ---
     def _calculate_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
         """ 计算损失。返回 (总损失Tensor, 包含各项损失的字典) """
@@ -171,7 +174,7 @@ class BaseTrainer:
         """ 从指标字典中获取用于保存模型和调度LR的主指标 """
         raise NotImplementedError
 
-    def _move_batch_to_device(self, batch) -> any:
+    def _move_batch_to_device(self, batch) -> Any:
         """ 将数据批次移动到指定设备 """
         raise NotImplementedError
 

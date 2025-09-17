@@ -39,7 +39,7 @@ trainer:
   class: dets_trainer           # -> sparrow.task.dets_trainer.DetsTrainer
   args:
     epochs: 300
-    save_dir: output/ssdlite_coco
+    save_dir: output/ssdlite
     img_size: 320
 
     # 优化器
@@ -73,7 +73,7 @@ data:
   train:
     builder: coco_dets_dataloader    # -> sparrow.datasets.coco_dets.create_det_dataloader
     args:
-      dataset_root: ./data/coco2017_ssdlite    # << 改成你的 COCO 根目录
+      dataset_root: ./data/coco2017_ssdlite
       img_size: 320
       batch_size: 64
       num_workers: 8

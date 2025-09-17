@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 from typing import Tuple, List, Dict
 
+
 class BoneLoss(nn.Module):
     """
     计算预测热图与目标热图之间，成对骨骼长度（范数）差异的损失。
@@ -40,6 +41,20 @@ class BoneLoss(nn.Module):
         # 按 batch size 和骨骼数量进行平均
         batch_size = pred_heatmaps.shape[0]
         return torch.sum(loss) / batch_size / len(self.indices_i)
+
+
+def _get_max_point(heatmap: torch.Tensor, center_weight: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    """ 在特征图上找到峰值点坐标 """
+    if center_weight is not None:
+        heatmap = heatmap * center_weight
+
+    B, _, H, W = heatmap.shape
+    flat = heatmap.view(B, -1)
+    _, max_id = torch.max(flat, dim=1)
+
+    y = (max_id // W).long()
+    x = (max_id % W).long()
+    return x, y
 
 
 class MoveNetLoss(nn.Module):
@@ -72,7 +87,7 @@ class MoveNetLoss(nn.Module):
 
         # 3. 找到GT中心点，作为回归和偏移损失的锚点
         center_weight = self._get_center_weight((B, H, W), device=targets.device, dtype=targets.dtype)
-        center_x, center_y = self._get_max_point(gt_centers, center_weight)
+        center_x, center_y = _get_max_point(gt_centers, center_weight)
 
         loss_regs = self._compute_regs_loss(pred_regs, gt_regs, center_x, center_y, kps_mask)
         loss_offset = self._compute_offset_loss(pred_offsets, gt_offsets, center_x, center_y, gt_regs, kps_mask)
@@ -80,15 +95,17 @@ class MoveNetLoss(nn.Module):
         return loss_heatmap, loss_bone, loss_center, loss_regs, loss_offset
 
     # --- 私有辅助方法 ---
-    def _weighted_mse_loss(self, pred: torch.Tensor, gt: torch.Tensor, weight: float = 8.0) -> torch.Tensor:
+    @staticmethod
+    def _weighted_mse_loss(pred: torch.Tensor, gt: torch.Tensor, weight: float = 8.0) -> torch.Tensor:
         """ 带前景加权的均方误差损失 """
         loss = torch.pow((pred - gt), 2)
         weight_mask = gt * weight + 1.0
         loss = loss * weight_mask
         # 按 batch 和 channel 平均
         return torch.sum(loss) / (gt.shape[0] * gt.shape[1])
-        
-    def _l1_loss(self, pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+
+    @staticmethod
+    def _l1_loss(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """ 带掩码的L1损失 """
         loss = torch.abs(pred - gt) * mask
         # 仅对有效数据点（mask.sum()）进行平均
@@ -163,19 +180,6 @@ class MoveNetLoss(nn.Module):
         mask = kps_mask.unsqueeze(-1)  # [B, J, 1]
         return self._l1_loss(pred_offsets_gathered, gt_offsets_gathered, mask)
 
-    def _get_max_point(self, heatmap: torch.Tensor, center_weight: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        """ 在特征图上找到峰值点坐标 """
-        if center_weight is not None:
-            heatmap = heatmap * center_weight
-            
-        B, _, H, W = heatmap.shape
-        flat = heatmap.view(B, -1)
-        _, max_id = torch.max(flat, dim=1)
-        
-        y = (max_id // W).long()
-        x = (max_id % W).long()
-        return x, y
-        
     @staticmethod
     def _create_center_weight(hw: Tuple[int, int], device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         """ 动态生成高斯中心权重图 """
