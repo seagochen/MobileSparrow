@@ -263,7 +263,7 @@ def _apply_cli_overrides_to_cfg(cfg: Dict[str, Any], overrides: Dict[str, Any]) 
 # =========================================================
 # 权重加载 / 保存相关
 # =========================================================
-def load_model_pt(model: Any, path: Optional[str] = None, strict: bool = True) -> None:
+def load_model_pt(model: Any, path: Optional[str] = None, strict: bool = True):
     """
     加载权重：兼容 state_dict（字典）与整模型（序列化 Module）两种格式。
 
@@ -276,22 +276,25 @@ def load_model_pt(model: Any, path: Optional[str] = None, strict: bool = True) -
     # 检测文件是否存在
     if path is None or not os.path.exists(path):
         raise FileNotFoundError(f"Weights file is not found or null.")
-
-    # 加载权重文件
+        
     ckpt = torch.load(path, map_location="cpu")
-
-    # 兼容方式
-    if isinstance(ckpt, dict) and ("model" in ckpt or "state_dict" in ckpt):
-        sd = ckpt.get("model", ckpt.get("state_dict"))
-        model.load_state_dict(sd, strict=strict)
-    elif isinstance(ckpt, dict):
-        # 可能是“裸 state_dict”
-        model.load_state_dict(ckpt, strict=strict)
-    else:
-        raise ValueError("ckpt file is failed to load.")
-
-    # 重みファイルを読み込む
-    logger.info("load_model_pt", f"The weights file is loaded: {path}")
+    sd = None
+    if isinstance(ckpt, dict):
+        # 优先识别完整断点与常见键
+        for k in ("model_state", "ema_state", "model", "state_dict"):
+            if k in ckpt and isinstance(ckpt[k], dict):
+                sd = ckpt[k]
+                break
+        # 裸 state_dict（所有 key 看起来像参数名：包含'.'）
+        if sd is None and all(isinstance(k, str) and "." in k for k in ckpt.keys()):
+            sd = ckpt
+    if sd is None:
+        raise ValueError(f"Unsupported checkpoint format: {path}")
+    current = model.state_dict()
+    matched = len([k for k in sd.keys() if k in current])
+    model.load_state_dict(sd, strict=False)
+    logger.info("load_model_pt", f"The weights file is loaded: {path} (matched {matched}/{len(current)} keys)")
+    return ckpt
 
 
 def save_last_and_best(trainer: Any, save_dir: str) -> None:
@@ -302,25 +305,22 @@ def save_last_and_best(trainer: Any, save_dir: str) -> None:
     """
     os.makedirs(save_dir, exist_ok=True)
 
-    # 保存 last.pt
+    # 仅当不存在“完整断点”时才兜底保存一个轻量版 last.pt
     last_path = os.path.join(save_dir, "last.pt")
+    if os.path.isfile(last_path):
+        try:
+            ck = torch.load(last_path, map_location="cpu")
+            if isinstance(ck, dict) and ("optimizer_state" in ck or "model_state" in ck):
+                logger.info("save_last_and_best", "检测到完整 checkpoint，跳过兜底覆盖。")
+                return
+        except Exception:
+            pass
     try:
-        # 若训练器提供了 state_dict 或模型/优化器等信息，自行组织
         torch.save({"model": getattr(trainer, "model", None).state_dict()
                     if hasattr(trainer, "model") else None}, last_path)
-        logger.info("save_last_and_best", f"已保存 last.pt 到: {last_path}")
+        logger.info("save_last_and_best", f"已保存轻量 last.pt 到: {last_path}")
     except Exception as e:
-        logger.warning("save_last_and_best", f"保存 last.pt 失败: {e}")
-
-    # 简单的 best 兜底：若存在 best 属性，复制一份
-    best_path = os.path.join(save_dir, "best.pt")
-    if os.path.isfile(best_path):
-        return
-    try:
-        # 这里不强制保存 best（多数训练器会在更优时覆盖 best.pt）
-        pass
-    except Exception as e:
-        logger.warning("save_last_and_best", f"保存 best.pt 失败: {e}")
+        logger.warning("save_last_and_best", f"保存轻量 last.pt 失败: {e}")
 
 
 # =========================================================
@@ -430,8 +430,9 @@ def cmd_train(cfg: Dict[str, Any]) -> None:
         best = os.path.join(save_dir, "best.pt")
         weights_path = last if os.path.isfile(last) else (best if os.path.isfile(best) else None)
 
+    ckpt_meta = None
     if weights_path:
-        load_model_pt(model, weights_path, strict=False)
+        ckpt_meta = load_model_pt(model, weights_path, strict=False)
     else:
         logger.warning("cmd_train", "Cannot find the weights file, start the training from scratch.")
 
@@ -440,6 +441,21 @@ def cmd_train(cfg: Dict[str, Any]) -> None:
         raise ValueError("trainer.class 为空，请在 YAML 中配置 trainer.class")
     train_ctor = resolve_callable(trainer_class)
     trainer = maybe_instantiate(train_ctor, {**trainer_args, "model": model})
+    # 尝试恢复优化器/最佳分数/epoch（若存在完整断点）
+    if resume_flag and isinstance(ckpt_meta, dict):
+        if "optimizer_state" in ckpt_meta:
+            try:
+                trainer.optimizer.load_state_dict(ckpt_meta["optimizer_state"])
+            except Exception as e:
+                logger.warning("cmd_train", f"恢复 optimizer 失败: {e}")
+        if "best_score" in ckpt_meta:
+            trainer.best_score = ckpt_meta["best_score"]
+        if "epoch" in ckpt_meta:
+            # 没保存 scheduler_state，这里尽力把 last_epoch 对齐
+            try:
+                trainer.scheduler.last_epoch = ckpt_meta["epoch"]
+            except Exception:
+                pass
 
     # -------------------------
     # 5) 构建数据（train / val），显式使用 builder / args
