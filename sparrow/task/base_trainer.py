@@ -247,9 +247,9 @@ class BaseTrainer:
 
             best_path = os.path.join(self.save_dir, "best.pt")
             torch.save(checkpoint, best_path)  # Save the same complete checkpoint structure
-            logger.warning("SAVING", f"[INFO] New best: main_score={score:.5f} -> saved to {best_path}")
+            logger.info("Trainer", f"New best: main_score={score:.5f} -> saved to {best_path}")
         else:
-            logger.warning("SAVING", f"[INFO] Kept best: main_score={self.best_score:.5f} (current {score:.5f})")
+            logger.info("Trainer", f"Kept best: main_score={self.best_score:.5f} (current {score:.5f})")
 
     def _on_train_end(self):
         print("Training finished.")
