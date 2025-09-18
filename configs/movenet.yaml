@@ -35,7 +35,7 @@ trainer:
   class: kpts_trainer
   args:
     epochs: 200
-    save_dir: output/movenet
+    save_dir: outputs/movenet
     img_size: 192
 
     # 优化器

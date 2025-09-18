@@ -21,7 +21,7 @@ trainer:
 
   args:
     epochs: 60
-    save_dir: outputs/reid_run
+    save_dir: outputs/reidlite
     img_h: 256
     img_w: 128
     num_classes: 1594

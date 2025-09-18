@@ -39,7 +39,7 @@ trainer:
   class: dets_trainer           # -> sparrow.task.dets_trainer.DetsTrainer
   args:
     epochs: 300
-    save_dir: output/ssdlite
+    save_dir: outputs/ssdlite
     img_size: 320
 
     # 优化器
