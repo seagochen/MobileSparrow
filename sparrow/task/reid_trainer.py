@@ -39,6 +39,7 @@ from typing import Dict, Tuple, Literal, Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from sparrow.task.base_trainer import BaseTrainer
 from sparrow.loss.reid_losses import ReIDCriterion
@@ -202,58 +203,107 @@ class ReIDTrainer(BaseTrainer):
         emb = self.model(imgs)  # BxD，建议模型内部已 L2-norm
         loss, loss_dict = self.crit(emb, labels)
 
-        # BaseTrainer 需要：(总损失Tensor, 可记录的 dict[float])
-        return loss, {"loss": float(loss.detach().cpu()), **{k: float(v) for k, v in loss_dict.items()}}
+        # 过滤掉 acc1（没什么用），同时将批内的 Recall@1 加入回指标中
+        r1, dpos, dneg = self._recall_at_1_in_batch(emb.detach(), labels.detach())
+        filtered = {k: float(v) for k, v in loss_dict.items() if k != "acc1"}
+        return loss, {"loss": float(loss.detach().cpu()), "r1": float(r1), **filtered}
 
     @staticmethod
     @torch.no_grad()
     def _eval_cmc_map(embeddings: torch.Tensor, labels: torch.Tensor, topk=(1, 5, 10), metric='cosine'):
         """
-        简化评估：all-vs-all。每个样本做 query，检索库是其余所有样本（排除自身）。
-        返回字典：{'cmc@1':..., 'cmc@5':..., 'cmc@10':..., 'map':...}
+        在 CPU 上评估 CMC/mAP；当 N 很大时分块处理，避免一次性构造 N×N。
+        embeddings: [N,D] (CPU, float32)
+        labels:     [N]
         """
-        device = embeddings.device
-        N = embeddings.size(0)
-        assert N == labels.size(0) and N > 1, "需要 N>1 才能做 all-vs-all 评估"
-
-        if metric == 'cosine':
-            feats = F.normalize(embeddings, dim=1)
-            sim = feats @ feats.t()  # [N,N]
-            sim.fill_diagonal_(-1e9)  # 排除自身
-            order = sim.argsort(dim=1, descending=True)
+        # ---- 强制在 CPU 上 ----
+        if embeddings.is_cuda:
+            embeddings = embeddings.float().cpu()
         else:
-            dist = torch.cdist(embeddings, embeddings, p=2)  # [N,N]
-            dist.fill_diagonal_(1e9)
-            order = dist.argsort(dim=1, descending=False)
+            embeddings = embeddings.float()
+        if labels.is_cuda:
+            labels = labels.cpu()
 
-        # 真值矩阵（同类为 True），对角线 False
-        lbl = labels.view(-1, 1)
-        is_match = (lbl == lbl.t())
-        is_match.fill_diagonal_(False)
+        N = embeddings.size(0)
+        assert N == labels.size(0) and N > 1
 
-        # CMC@k
-        metrics = {}
-        for k in topk:
-            topk_idx = order[:, :k]  # [N,k]
-            hits_topk = is_match.gather(1, topk_idx).any(dim=1)  # [N]
-            metrics[f"cmc@{k}"] = hits_topk.float().mean().item()
+        # 预处理：余弦归一化
+        if metric == 'cosine':
+            feats = torch.nn.functional.normalize(embeddings, dim=1)
+        else:
+            # 欧氏距离也转到 CPU，但后面仍用分块；cosine 更省事
+            feats = embeddings
 
-        # mAP
+        # 预分配 CMC 计数
+        cmc_hits = {k: 0 for k in topk}
         ap_list = []
-        for i in range(N):
-            idx = order[i]
-            gt = is_match[i].gather(0, idx)  # [N-1]
-            num_rel = int(gt.sum().item())
-            if num_rel == 0:
-                continue
-            hits = gt.float()
-            cumsum = torch.cumsum(hits, dim=0)
-            ranks = torch.arange(1, hits.numel() + 1, device=device, dtype=torch.float32)
-            precision_at_k = cumsum / ranks
-            ap = (precision_at_k * hits).sum() / num_rel
-            ap_list.append(ap.item())
-        metrics["map"] = float(sum(ap_list) / max(1, len(ap_list)))
+
+        # 真值（CPU bool）
+        lbl = labels.view(-1, 1)
+        is_match_full = (lbl == lbl.t())  # [N,N] (CPU)
+        # 为了节省峰值内存，后面分块时再按行切片使用；对角自匹配在每块里屏蔽
+
+        # 分块大小（可按内存调大/调小）
+        # 例如 1024 一块：每块仅需要构造 [b,N] 的相似度矩阵
+        block = 1024 if N > 6000 else N
+
+        for start in range(0, N, block):
+            end = min(start + block, N)
+            rows = end - start
+
+            # 当前块与全体的相似度/距离：在 CPU 上做矩阵乘
+            if metric == 'cosine':
+                # [rows, D] @ [D, N] -> [rows, N]
+                sim = feats[start:end] @ feats.t()
+                # 屏蔽自身
+                idx = torch.arange(start, end)
+                sim[torch.arange(rows), idx] = -1e9
+                # 对每一行做全排序（CPU 内存足够；仅保存索引）
+                order = sim.argsort(dim=1, descending=True)  # [rows, N]
+                del sim
+            else:
+                # 欧氏距离（CPU）分块计算
+                x = feats[start:end]
+                # (x - y)^2 = x^2 + y^2 - 2xy；用广播避免构造 N×N 的差
+                x2 = (x * x).sum(dim=1, keepdim=True)  # [rows,1]
+                y2 = (feats * feats).sum(dim=1).view(1, -1)  # [1,N]
+                dist2 = x2 + y2 - 2.0 * (x @ feats.t())  # [rows,N]
+                idx = torch.arange(start, end)
+                dist2[torch.arange(rows), idx] = 1e18
+                order = dist2.argsort(dim=1, descending=False)
+                del x2, y2, dist2
+
+            # 该块对应的真值切片
+            gt_block = is_match_full[start:end]  # [rows, N]
+
+            # ====== 统计 CMC@k ======
+            for k in topk:
+                topk_idx = order[:, :k]  # [rows, k]
+                hits_topk = gt_block.gather(1, topk_idx).any(dim=1)  # [rows]
+                cmc_hits[k] += int(hits_topk.sum().item())
+
+            # ====== 统计 AP（mAP） ======
+            # 对块内每一行计算一次 AP
+            for i in range(rows):
+                ord_i = order[i]
+                gt_i = gt_block[i].gather(0, ord_i)  # [N]
+                num_rel = int(gt_i.sum().item())
+                if num_rel == 0:
+                    continue
+                hits = gt_i.to(torch.float32)
+                cumsum = torch.cumsum(hits, dim=0)
+                ranks = torch.arange(1, hits.numel() + 1, dtype=torch.float32)
+                precision_at_k = cumsum / ranks
+                ap = float((precision_at_k * hits).sum() / num_rel)
+                ap_list.append(ap)
+
+            del order, gt_block  # 及时释放
+
+        # 汇总
+        metrics = {f"cmc@{k}": cmc_hits[k] / float(N) for k in topk}
+        metrics["map"] = (sum(ap_list) / max(1, len(ap_list))) if ap_list else 0.0
         return metrics
+
 
     @torch.no_grad()
     def _calculate_metrics(self, model, batch) -> Dict[str, float]:
@@ -326,9 +376,9 @@ class ReIDTrainer(BaseTrainer):
             all_lbls.append(labels.detach())
 
         # —— 整集评估 CMC/mAP —— #
-        embs = torch.cat(all_embs, dim=0)
-        lbls = torch.cat(all_lbls, dim=0)
-        cmc_map = self._eval_cmc_map(embs, lbls, topk=(1,5,10), metric='cosine')
+        embs = torch.cat(all_embs, dim=0).float().cpu()
+        lbls = torch.cat(all_lbls, dim=0).cpu()
+        cmc_map = self._eval_cmc_map(embs, lbls, topk=(1, 5, 10), metric='cosine')
 
         # 把 CMC/mAP 也纳入 meters 的“均值化接口”里（直接按样本数权重=1 累加）
         for k, v in cmc_map.items():
