@@ -18,6 +18,7 @@ config_*.json
 
 # Ignore the downloaded dataset
 data/coco2017*/
+data/reid/
 
 # Ignore other files
 data/cropped/

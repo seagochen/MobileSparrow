@@ -4,6 +4,8 @@ from typing import Union, Literal
 import torch
 from torch import optim
 
+from sparrow.utils.logger import logger
+
 
 # =========================
 # Schedulers / Optimizers
@@ -58,8 +60,18 @@ def select_optimizer(name: str, model: torch.nn.Module, lr: float, weight_decay:
       - select_optimizer("adamw", model, lr=..., ...)            # 传 model，本函数内部取 .parameters()
       - select_optimizer("adamw", model.parameters(), lr=..., ...)  # 传 params，可迭代
     """
-    # 获取模型参数
-    params = model.parameters()
+    # 获取模型参数（兼容直接传可迭代参数的情况）
+    params = model.parameters() if hasattr(model, "parameters") else model
+
+    # 强制把可被 YAML 写成字符串的超参转为 float
+    try:
+        lr = float(lr)
+        weight_decay = float(weight_decay)
+    except ArithmeticError:
+        logger.warning("select_optimizer", "Convert the number to float failed, use default values")
+        # 转换失败，使用默认参数
+        lr = 3e-4
+        weight_decay = 1e-4
 
     name = (name or "").lower()
     if name in ("adam",):

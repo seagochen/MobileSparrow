@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Tuple, Dict, Union
 
-Tensor = torch.Tensor
+
+# Tensor = torch.Tensor
 
 class DBLiteLoss(nn.Module):
     """
@@ -68,6 +69,7 @@ class DBLiteLoss(nn.Module):
 
         total = self.bce_ratio * bce + self.dice_ratio * dice + self.l1_ratio * l1
         return {"loss": total, "loss_bce": bce, "loss_dice": dice, "loss_l1": l1}
+
 
 class CTCLoss(nn.Module):
     """Thin wrapper around nn.CTCLoss for (B,T,C) logits.

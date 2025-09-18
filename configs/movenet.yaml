@@ -12,13 +12,13 @@ resume: true
 # 模型
 # -----------------------------
 model:
-  class: movenet            # alias -> sparrow.models.movenet.MoveNet
+  class: movenet              # alias -> sparrow.models.movenet.movenet
   args:
-    backbone: shufflenet_v2   # ← 从 JSON 的 shufflenet_v2
-    width_mult: 1.5           # ← JSON
-    num_joints: 17            # ← JSON task_params.num_joints
-    neck_outc: 96             # ← JSON（模型若需要就会吃到）
-    head_midc: 48             # ← JSON（模型若需要就会吃到）
+    backbone: mobilenet_v2
+    width_mult: 1.0           # 在嵌入式环境中，选择width_mult 1.0比较合适，如果资源足够，可以适当调高一些
+    num_joints: 17
+    neck_outc: 96
+    head_midc: 48
 
   # class: movenet
   # args:
@@ -35,7 +35,7 @@ trainer:
   class: kpts_trainer
   args:
     epochs: 200
-    save_dir: output/movenet
+    save_dir: outputs/movenet
     img_size: 192
 
     # 优化器

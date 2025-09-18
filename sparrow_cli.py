@@ -49,14 +49,17 @@ ALIASES: Dict[str, str] = {
     # 模型
     "movenet": "sparrow.models.movenet.MoveNet",
     "ssdlite": "sparrow.models.ssdlite.SSDLite",
+    "reidlite": "sparrow.models.reidlite.ReIDLite",
 
     # 训练器
     "kpts_trainer": "sparrow.task.kpts_trainer.KptsTrainer",
     "dets_trainer": "sparrow.task.dets_trainer.DetsTrainer",
+    "reid_trainer": "sparrow.task.reid_trainer.ReIDTrainer",
 
     # 数据构建器（dataloader 工厂函数）
     "coco_kpts_dataloader": "sparrow.datasets.coco_kpts.create_kpts_dataloader",
     "coco_dets_dataloader": "sparrow.datasets.coco_dets.create_dets_dataloader",
+    "reid_dataloader": "sparrow.datasets.reid_data.reid_dataloader",
     "simple_image_folder": "sparrow.datasets.simple_loader.SimpleImageFolder",
 
     # 导出包装器
@@ -263,7 +266,7 @@ def _apply_cli_overrides_to_cfg(cfg: Dict[str, Any], overrides: Dict[str, Any]) 
 # =========================================================
 # 权重加载 / 保存相关
 # =========================================================
-def load_model_pt(model: Any, path: Optional[str] = None, strict: bool = True) -> None:
+def load_model_pt(model: Any, path: Optional[str] = None, strict: bool = True):
     """
     加载权重：兼容 state_dict（字典）与整模型（序列化 Module）两种格式。
 
@@ -276,22 +279,25 @@ def load_model_pt(model: Any, path: Optional[str] = None, strict: bool = True) -
     # 检测文件是否存在
     if path is None or not os.path.exists(path):
         raise FileNotFoundError(f"Weights file is not found or null.")
-
-    # 加载权重文件
+        
     ckpt = torch.load(path, map_location="cpu")
-
-    # 兼容方式
-    if isinstance(ckpt, dict) and ("model" in ckpt or "state_dict" in ckpt):
-        sd = ckpt.get("model", ckpt.get("state_dict"))
-        model.load_state_dict(sd, strict=strict)
-    elif isinstance(ckpt, dict):
-        # 可能是“裸 state_dict”
-        model.load_state_dict(ckpt, strict=strict)
-    else:
-        raise ValueError("ckpt file is failed to load.")
-
-    # 重みファイルを読み込む
-    logger.info("load_model_pt", f"The weights file is loaded: {path}")
+    sd = None
+    if isinstance(ckpt, dict):
+        # 优先识别完整断点与常见键
+        for k in ("model_state", "ema_state", "model", "state_dict"):
+            if k in ckpt and isinstance(ckpt[k], dict):
+                sd = ckpt[k]
+                break
+        # 裸 state_dict（所有 key 看起来像参数名：包含'.'）
+        if sd is None and all(isinstance(k, str) and "." in k for k in ckpt.keys()):
+            sd = ckpt
+    if sd is None:
+        raise ValueError(f"Unsupported checkpoint format: {path}")
+    current = model.state_dict()
+    matched = len([k for k in sd.keys() if k in current])
+    model.load_state_dict(sd, strict=False)
+    logger.info("load_model_pt", f"The weights file is loaded: {path} (matched {matched}/{len(current)} keys)")
+    return ckpt
 
 
 def save_last_and_best(trainer: Any, save_dir: str) -> None:
@@ -302,25 +308,22 @@ def save_last_and_best(trainer: Any, save_dir: str) -> None:
     """
     os.makedirs(save_dir, exist_ok=True)
 
-    # 保存 last.pt
+    # 仅当不存在“完整断点”时才兜底保存一个轻量版 last.pt
     last_path = os.path.join(save_dir, "last.pt")
+    if os.path.isfile(last_path):
+        try:
+            ck = torch.load(last_path, map_location="cpu")
+            if isinstance(ck, dict) and ("optimizer_state" in ck or "model_state" in ck):
+                logger.info("save_last_and_best", "检测到完整 checkpoint，跳过兜底覆盖。")
+                return
+        except Exception:
+            pass
     try:
-        # 若训练器提供了 state_dict 或模型/优化器等信息，自行组织
         torch.save({"model": getattr(trainer, "model", None).state_dict()
                     if hasattr(trainer, "model") else None}, last_path)
-        logger.info("save_last_and_best", f"已保存 last.pt 到: {last_path}")
+        logger.info("save_last_and_best", f"已保存轻量 last.pt 到: {last_path}")
     except Exception as e:
-        logger.warning("save_last_and_best", f"保存 last.pt 失败: {e}")
-
-    # 简单的 best 兜底：若存在 best 属性，复制一份
-    best_path = os.path.join(save_dir, "best.pt")
-    if os.path.isfile(best_path):
-        return
-    try:
-        # 这里不强制保存 best（多数训练器会在更优时覆盖 best.pt）
-        pass
-    except Exception as e:
-        logger.warning("save_last_and_best", f"保存 best.pt 失败: {e}")
+        logger.warning("save_last_and_best", f"保存轻量 last.pt 失败: {e}")
 
 
 # =========================================================
@@ -414,33 +417,48 @@ def cmd_train(cfg: Dict[str, Any]) -> None:
     set_seed_and_deterministic(seed, deterministic)
 
     # -------------------------
-    # 3) 构建模型与训练器（显式使用 model_class / model_args）
+    # 3) 先构建模型（稍后再构建训练器）
     # -------------------------
     if not model_class:
         raise ValueError("model.class 为空，请在 YAML 中配置 model.class")
     model_ctor = resolve_callable(model_class)
     model = maybe_instantiate(model_ctor, model_args)
 
+    # -------------------------
+    # 4) 权重 / 断点恢复（仅当 YAML 顶层 resume: true 时触发）
+    # -------------------------
+    weights_path = None
+    if resume_flag:
+        last = os.path.join(save_dir, "last.pt")
+        best = os.path.join(save_dir, "best.pt")
+        weights_path = last if os.path.isfile(last) else (best if os.path.isfile(best) else None)
+
+    ckpt_meta = None
+    if weights_path:
+        ckpt_meta = load_model_pt(model, weights_path, strict=False)
+    else:
+        logger.warning("cmd_train", "Cannot find the weights file, start the training from scratch.")
+
+    # 现在再构建训练器，确保优化器/EMA等基于已加载权重初始化
     if not trainer_class:
         raise ValueError("trainer.class 为空，请在 YAML 中配置 trainer.class")
     train_ctor = resolve_callable(trainer_class)
     trainer = maybe_instantiate(train_ctor, {**trainer_args, "model": model})
-
-    # -------------------------
-    # 4) 权重 / 断点恢复（resume 优先于 weights）
-    # -------------------------
-    if resume_flag:
-        best = os.path.join(save_dir, "best.pt")
-        last = os.path.join(save_dir, "last.pt")
-        weights_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else None)
-    else:
-        weights_path = None
-
-    # 加载权重
-    if weights_path:
-        load_model_pt(model, weights_path, strict=False)
-    else:
-        logger.warning("cmd_train", "未提供可用权重，将在随机初始化权重上开始训练")
+    # 尝试恢复优化器/最佳分数/epoch（若存在完整断点）
+    if resume_flag and isinstance(ckpt_meta, dict):
+        if "optimizer_state" in ckpt_meta:
+            try:
+                trainer.optimizer.load_state_dict(ckpt_meta["optimizer_state"])
+            except Exception as e:
+                logger.warning("cmd_train", f"恢复 optimizer 失败: {e}")
+        if "best_score" in ckpt_meta:
+            trainer.best_score = ckpt_meta["best_score"]
+        if "epoch" in ckpt_meta:
+            # 没保存 scheduler_state，这里尽力把 last_epoch 对齐
+            try:
+                trainer.scheduler.last_epoch = ckpt_meta["epoch"]
+            except Exception:
+                pass
 
     # -------------------------
     # 5) 构建数据（train / val），显式使用 builder / args
@@ -501,9 +519,11 @@ def cmd_eval(cfg: Dict[str, Any]) -> None:
     save_dir: str = trainer_args.get("save_dir", "outputs/default_run")
 
     # 权重优先顺序：CLI/YAML 的 weights -> save_dir/{best.pt,last.pt}
-    best = os.path.join(save_dir, "best.pt")
-    last = os.path.join(save_dir, "last.pt")
-    weights_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else None)
+    weights_path = cfg.get("weights", None)
+    if not weights_path:
+        best = os.path.join(save_dir, "best.pt")
+        last = os.path.join(save_dir, "last.pt")
+        weights_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else None)
 
     # 数据段（只需要 val）
     data_cfg: Dict[str, Any] = cfg.get("data", {}) or {}
@@ -684,9 +704,9 @@ def build_argparser() -> argparse.ArgumentParser:
         sp.add_argument("-c", "--config", required=True, help="YAML 配置文件路径")
         sp.add_argument("--set", dest="overrides", nargs="*", default=[],
                         help="临时覆盖配置，格式：--set a.b.c=val x.y=2")
-        sp.add_argument("--save-dir", default="", help="覆盖 trainer.args.save_dir")
         sp.add_argument("--weights", default="", help="权重文件路径（优先级高于 YAML 中的 weights）")
-        sp.add_argument("--continue", dest="cont", action="store_true", help="从 save_dir/last.pt 断点继续")
+        # sp.add_argument("--save-dir", default="", help="覆盖 trainer.args.save_dir")
+        # sp.add_argument("--continue", dest="cont", action="store_true", help="从 save_dir/last.pt 断点继续")
 
     # train
     sp_train = sub.add_parser("train", help="训练")
@@ -715,17 +735,9 @@ def _apply_cli_to_cfg(cfg: Dict[str, Any], args: argparse.Namespace) -> None:
     将常见的 CLI 选项回写到 YAML 配置中（统一下游逻辑）。
     优先级：CLI > YAML
     """
-    # 顶层覆盖
-    if args.cont:
-        cfg["resume"] = True
-    if args.weights:
+    
+    if getattr(args, "weights", ""):
         cfg["weights"] = args.weights
-
-    # 覆盖 save_dir
-    if args.save_dir:
-        trainer = cfg.setdefault("trainer", {})
-        targs = trainer.setdefault("args", {})
-        targs["save_dir"] = args.save_dir
 
     # 导出子命令的附加覆盖
     if args.cmd == "export":
