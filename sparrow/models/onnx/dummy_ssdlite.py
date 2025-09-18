@@ -1,5 +1,8 @@
 # sparrow/models/onnx/dummy_ssdlite.py
-import torch, torch.nn as nn, torch.nn.functional as F
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 
 class DummySSDLite(nn.Module):
     """

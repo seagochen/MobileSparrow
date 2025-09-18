@@ -10,23 +10,6 @@ def conv_bn(inp, oup, k, s, p, g=1, act=True):
     if act: layers += [nn.ReLU6(inplace=True)]
     return nn.Sequential(*layers)
 
-class InvertedResidual(nn.Module):
-    def __init__(self, inp, oup, stride, expand_ratio):
-        super().__init__()
-        hidden_dim = int(round(inp * expand_ratio))
-        self.use_res_connect = stride == 1 and inp == oup
-        layers = []
-        if expand_ratio != 1:
-            layers.append(conv_bn(inp, hidden_dim, 1, 1, 0))
-        layers.extend([
-            conv_bn(hidden_dim, hidden_dim, 3, stride, 1, g=hidden_dim),
-            nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(oup),
-        ])
-        self.conv = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return x + self.conv(x) if self.use_res_connect else self.conv(x)
 
 class MobileNetV2Backbone(nn.Module):
     """
@@ -90,3 +73,23 @@ class MobileNetV2Backbone(nn.Module):
             if i == self.c4_idx: c4 = x
             if i == self.c5_idx: c5 = x
         return c3, c4, c5
+
+
+class InvertedResidual(nn.Module):
+
+    def __init__(self, inp, oup, stride, expand_ratio):
+        super().__init__()
+        hidden_dim = int(round(inp * expand_ratio))
+        self.use_res_connect = stride == 1 and inp == oup
+        layers = []
+        if expand_ratio != 1:
+            layers.append(conv_bn(inp, hidden_dim, 1, 1, 0))
+        layers.extend([
+            conv_bn(hidden_dim, hidden_dim, 3, stride, 1, g=hidden_dim),
+            nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(oup),
+        ])
+        self.conv = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return x + self.conv(x) if self.use_res_connect else self.conv(x)

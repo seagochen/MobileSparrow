@@ -16,7 +16,7 @@ model:
   args:
     num_classes: 81             # COCO: 80 + 背景1
     backbone: mobilenet_v2      # 或 shufflenet_v2
-    width_mult: 1.0
+    width_mult: 1.0             # 在嵌入式环境中，选择width_mult 1.0比较合适，如果资源足够，可以适当调高一些
     neck_outc: 96
     anchor_ratios: [1.0, 2.0, 0.5]
     anchor_scales: [1.0, 1.26]
@@ -39,7 +39,7 @@ trainer:
   class: dets_trainer           # -> sparrow.task.dets_trainer.DetsTrainer
   args:
     epochs: 300
-    save_dir: output/ssdlite
+    save_dir: outputs/ssdlite
     img_size: 320
 
     # 优化器

@@ -14,3 +14,4 @@ onnx
 nvitop
 pycocotools
 pyyaml
+kagglehub
