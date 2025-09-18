@@ -49,7 +49,10 @@ class BaseTrainer:
                  ema_decay: float = 0.9998,
                  clip_grad_norm: float = 0.0,
                  # 日志参数
-                 log_interval: int = 10
+                 log_interval: int = 10,
+                 # 梯度监控（可选）
+                 debug_grad_flow: bool = False,
+                 debug_grad_every: int = 50,
                  ):
 
         # --- 核心组件 ---
@@ -92,6 +95,12 @@ class BaseTrainer:
         self.best_score = float("-inf") if self.main_mode == "max" else float("inf")
         self.log_interval = log_interval
 
+        # ---- 梯度监控配置 ----
+        self.debug_grad_flow = bool(debug_grad_flow)
+        self.debug_grad_every = int(debug_grad_every)
+        self._debug_step_counter = 0
+
+
     def train(self, train_loader, val_loader):
         """ 训练主循环 (模板方法) """
         for epoch in range(self.epochs):
@@ -130,6 +139,17 @@ class BaseTrainer:
             self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
 
+            # ---- 梯度监控：读取各参数组梯度均值（在 step 之前）----
+            if self.debug_grad_flow:
+                # 为拿“真实梯度”做统计，AMP 下需要先 unscale（不会影响后续 step）
+                if self.scaler.is_enabled():
+                    try:
+                        self.scaler.unscale_(self.optimizer)
+                    except RuntimeError:
+                        pass
+                self._log_grad_flow_once()
+
+            # 防止梯度爆炸
             if self.clip_grad_norm > 0:
                 self.scaler.unscale_(self.optimizer)                    # 先反缩放 AMP 梯度
                 common.clip_gradient(self.optimizer, self.clip_grad_norm)    # 范数裁剪, 避免梯度爆炸
@@ -235,3 +255,28 @@ class BaseTrainer:
         del self.model
         gc.collect()
         torch.cuda.empty_cache()
+
+    def _log_grad_flow_once(self):
+        self._debug_step_counter += 1
+        if (self._debug_step_counter % max(1, self.debug_grad_every)) != 0:
+            return
+
+        group_msgs = []
+        for gi, group in enumerate(self.optimizer.param_groups):
+            grads = []
+            for p in group.get('params', []):
+                if p is None or (not hasattr(p, 'grad')):
+                    continue
+                g = p.grad
+                if g is None:
+                    continue
+                try:
+                    grads.append(g.detach().abs().mean().item())
+                except Exception:
+                    pass
+            if grads:
+                group_msgs.append(f"g{gi}:{mean(grads):.3e}")
+            else:
+                group_msgs.append(f"g{gi}:None")
+
+        logger.info("GRAD", " | ".join(group_msgs))
