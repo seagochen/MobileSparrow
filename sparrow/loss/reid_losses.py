@@ -1,4 +1,4 @@
-# reidlite_losses.py
+# reid_losses.py
 from typing import Literal
 
 import torch

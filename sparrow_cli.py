@@ -49,14 +49,17 @@ ALIASES: Dict[str, str] = {
     # 模型
     "movenet": "sparrow.models.movenet.MoveNet",
     "ssdlite": "sparrow.models.ssdlite.SSDLite",
+    "reidlite": "sparrow.models.reidlite.ReIDLite",
 
     # 训练器
     "kpts_trainer": "sparrow.task.kpts_trainer.KptsTrainer",
     "dets_trainer": "sparrow.task.dets_trainer.DetsTrainer",
+    "reid_trainer": "sparrow.task.reid_trainer.ReIDTrainer",
 
     # 数据构建器（dataloader 工厂函数）
     "coco_kpts_dataloader": "sparrow.datasets.coco_kpts.create_kpts_dataloader",
     "coco_dets_dataloader": "sparrow.datasets.coco_dets.create_dets_dataloader",
+    "reid_dataloader": "sparrow.datasets.reid_data.reid_dataloader",
     "simple_image_folder": "sparrow.datasets.simple_loader.SimpleImageFolder",
 
     # 导出包装器
