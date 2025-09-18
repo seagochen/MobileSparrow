@@ -221,7 +221,7 @@ class BaseTrainer:
     def _log_stats(self, stage, epoch, epochs, meters: Dict):
         log_str = " ".join([f"{k}={v:.4f}" for k, v in meters.items()])
         lr = self.optimizer.param_groups[0]['lr']
-        logger.debug("STATUS", f"LR: {lr:f} - [{stage}] {epoch + 1}/{epochs} {log_str}")
+        logger.debug("Trainer", f"LR: {lr:f} - [{stage}] {epoch + 1}/{epochs} {log_str}")
 
     def _save_checkpoints(self, score: float, epoch: int):
         net_to_save = self.ema.ema if self.ema else self.model
