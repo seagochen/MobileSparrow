@@ -24,7 +24,7 @@ trainer:
     save_dir: outputs/reid_run
     img_h: 256
     img_w: 128
-    num_classes: 1234
+    num_classes: 1594
     id_head: cosface
     w_id: 1.0
     w_tri: 1.0

@@ -17,7 +17,6 @@ ReIDTrainer
       save_dir: outputs/reid_run
       img_h: 256
       img_w: 128
-      num_classes: 1234              # 必填：ID 类别数（与数据一致）
       id_head: cosface               # or arcface
       triplet_margin: 0.3
       w_id: 1.0
@@ -43,6 +42,8 @@ import torch.nn as nn
 
 from sparrow.task.base_trainer import BaseTrainer
 from sparrow.loss.reid_losses import ReIDCriterion
+
+from sparrow.utils.logger import logger
 
 
 class ReIDTrainer(BaseTrainer):
@@ -122,7 +123,8 @@ class ReIDTrainer(BaseTrainer):
         )
 
         if not isinstance(num_classes, int):
-            raise ValueError("ReIDTrainer: 需要 num_classes（身份类别数），请在 YAML 的 trainer.args 中提供。")
+            logger.warning("ReIDTrainer", "需要 num_classes（身份类别数），请在 YAML 的 trainer.args 中提供。")
+            num_classes = 1000
 
         # 组合损失（分类 + 三元组）
         self.crit = ReIDCriterion(
@@ -143,6 +145,11 @@ class ReIDTrainer(BaseTrainer):
         self.img_h = int(img_h)
         self.img_w = int(img_w)
         self._val_main = main_metric  # 决定 _get_main_metric 返回什么
+        # 记录 head 配置（用于后续按数据真实类数重建 head）
+        self._id_head_type = id_head
+        self._emb_dim = emb_dim
+        self._label_smooth_eps = label_smooth_eps
+        self._triplet_margin = triplet_margin
 
 
     # ============ BaseTrainer 抽象方法实现（与 dets/kpts 同套路） ============
@@ -157,6 +164,36 @@ class ReIDTrainer(BaseTrainer):
             imgs, labels = batch
         return imgs.to(self.device, non_blocking=True), labels.to(self.device, non_blocking=True)
 
+
+    def ensure_num_classes(self, nc: int) -> None:
+        """
+        若当前 head 的类数与数据不一致，则重建 criterion 并把参数加入优化器。
+        可避免 targets 超出 num_classes 导致 scatter_ 越界。
+         """
+
+        cur_w = getattr(getattr(self.crit, "head", None), "weight", None)
+        cur_c = int(cur_w.size(0)) if cur_w is not None else -1
+
+        if cur_c == nc:
+            return  # 已一致
+
+        # 记录设备，并重建 criterion
+        dev = next(self.crit.parameters()).device
+        self.crit = ReIDCriterion(
+            num_classes = nc,
+            emb_dim = self._emb_dim,
+            id_head = self._id_head_type,
+            w_id = self.crit.w_id,
+            w_tri = self.crit.w_tri,
+            smooth_eps = self._label_smooth_eps,
+            triplet_margin = self._triplet_margin
+        ).to(dev)
+
+        # 把新 head 参数纳入优化器（否则不会更新）
+        if hasattr(self, "optimizer"):
+            self.optimizer.add_param_group({"params": self.crit.parameters()})
+
+
     def _calculate_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         计算训练阶段损失（分类 + Triplet）。
@@ -168,6 +205,7 @@ class ReIDTrainer(BaseTrainer):
         loss, loss_dict = self.crit(emb, labels)
         # BaseTrainer 需要：(总损失Tensor, 可记录的 dict[float])
         return loss, {"loss": float(loss.detach().cpu()), **{k: float(v) for k, v in loss_dict.items()}}
+
 
     @torch.no_grad()
     def _calculate_metrics(self, model, batch) -> Dict[str, float]:

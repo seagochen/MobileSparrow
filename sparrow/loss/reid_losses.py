@@ -37,7 +37,16 @@ class CosMarginHead(nn.Module):
     def forward(self, emb: torch.Tensor, targets: torch.Tensor):
         # emb: BxD (assume L2-normalized), weight will be normalized on the fly
         W = F.normalize(self.weight, dim=1)               # CxD
+        # 设备对齐（避免 CPU/GPU 不一致导致 F.linear 报错）
+        if W.device != emb.device:
+            W = W.to(emb.device)
         cos = F.linear(emb, W)                            # BxC
+        # 目标索引检查（避免 CUDA scatter_ 内核越界断言）
+        targets = targets.long()
+        C = cos.size(1)
+        if (targets.min() < 0) or (targets.max() >= C):
+            raise IndexError(f"targets index out of range: min={int(targets.min())}, "
+                             f"max={int(targets.max())}, num_classes={C}")
         # subtract margin on target logits
         one_hot = torch.zeros_like(cos).scatter_(1, targets.view(-1,1), 1.0)
         logits = self.s * (cos - one_hot * self.m)
@@ -56,7 +65,16 @@ class ArcMarginHead(nn.Module):
 
     def forward(self, emb: torch.Tensor, targets: torch.Tensor):
         W = F.normalize(self.weight, dim=1)               # CxD
+        # 设备对齐
+        if W.device != emb.device:
+            W = W.to(emb.device)
         cos = F.linear(emb, W).clamp(-1, 1)               # BxC
+        # 目标索引检查
+        targets = targets.long()
+        C = cos.size(1)
+        if (targets.min() < 0) or (targets.max() >= C):
+            raise IndexError(f"targets index out of range: min={int(targets.min())}, "
+                             f"max={int(targets.max())}, num_classes={C}")
         sin = torch.sqrt((1.0 - cos**2).clamp_min(1e-6))
         cos_m = torch.cos(torch.tensor(self.m, device=emb.device))
         sin_m = torch.sin(torch.tensor(self.m, device=emb.device))
