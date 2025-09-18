@@ -151,7 +151,6 @@ class ReIDTrainer(BaseTrainer):
         self._label_smooth_eps = label_smooth_eps
         self._triplet_margin = triplet_margin
 
-
     # ============ BaseTrainer 抽象方法实现（与 dets/kpts 同套路） ============
     def _move_batch_to_device(self, batch) -> Any:
         """
@@ -163,7 +162,6 @@ class ReIDTrainer(BaseTrainer):
         else:
             imgs, labels = batch
         return imgs.to(self.device, non_blocking=True), labels.to(self.device, non_blocking=True)
-
 
     def ensure_num_classes(self, nc: int) -> None:
         """
@@ -203,6 +201,7 @@ class ReIDTrainer(BaseTrainer):
         imgs, labels = batch
         emb = self.model(imgs)  # BxD，建议模型内部已 L2-norm
         loss, loss_dict = self.crit(emb, labels)
+
         # BaseTrainer 需要：(总损失Tensor, 可记录的 dict[float])
         return loss, {"loss": float(loss.detach().cpu()), **{k: float(v) for k, v in loss_dict.items()}}
 

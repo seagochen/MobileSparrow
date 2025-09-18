@@ -50,6 +50,10 @@ trainer:
       clip_grad_norm: 0.0
       log_interval: 10
 
+      debug_grad_flow: true     # 开启监控
+      debug_grad_every: 50      # 每隔多少个 iteration 打印一次
+
+
 data:
   train:
     builder: reid_dataloader
