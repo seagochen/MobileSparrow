@@ -215,7 +215,8 @@ class BaseTrainer:
     def _log_iter_stats(self, epoch, epochs, i, total_i, meters: Dict):
         mean_meters = self._get_mean_meters(meters)
         log_str = " ".join([f"{k}={v:.4f}" for k, v in mean_meters.items()])
-        print(f"\r{epoch + 1}/{epochs} [{i}/{total_i}] {log_str}", end='', flush=True)
+        # 原来是 [{i}/{total_i}]
+        print(f"\r{epoch + 1}/{epochs} [{i + 1}/{total_i}] {log_str}", end='', flush=True)
 
     def _log_stats(self, stage, epoch, epochs, meters: Dict):
         log_str = " ".join([f"{k}={v:.4f}" for k, v in meters.items()])

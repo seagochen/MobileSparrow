@@ -97,6 +97,7 @@ class RandomIdentitySampler(Sampler[List[int]]):
     - 保证 batch-hard Triplet 需要的“同类对”
     """
     def __init__(self, dataset: ReIDPairsDataset, batch_size: int, num_instances: int, drop_last: bool = True):
+        super().__init__()
         assert batch_size % num_instances == 0, "batch_size 必须能被 num_instances 整除"
         self.dataset = dataset
         self.num_instances = num_instances
@@ -126,7 +127,10 @@ class RandomIdentitySampler(Sampler[List[int]]):
             yield batch
 
     def __len__(self):
-        return len(self.dataset) // (self.num_pids_per_batch * self.num_instances)
+        if self.drop_last:
+            return len(self.labels) // self.num_pids_per_batch
+        else:
+            return math.ceil(len(self.labels) / self.num_pids_per_batch)
 
 
 # =========================
