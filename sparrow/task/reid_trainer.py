@@ -205,6 +205,55 @@ class ReIDTrainer(BaseTrainer):
         # BaseTrainer 需要：(总损失Tensor, 可记录的 dict[float])
         return loss, {"loss": float(loss.detach().cpu()), **{k: float(v) for k, v in loss_dict.items()}}
 
+    @staticmethod
+    @torch.no_grad()
+    def _eval_cmc_map(embeddings: torch.Tensor, labels: torch.Tensor, topk=(1, 5, 10), metric='cosine'):
+        """
+        简化评估：all-vs-all。每个样本做 query，检索库是其余所有样本（排除自身）。
+        返回字典：{'cmc@1':..., 'cmc@5':..., 'cmc@10':..., 'map':...}
+        """
+        device = embeddings.device
+        N = embeddings.size(0)
+        assert N == labels.size(0) and N > 1, "需要 N>1 才能做 all-vs-all 评估"
+
+        if metric == 'cosine':
+            feats = F.normalize(embeddings, dim=1)
+            sim = feats @ feats.t()  # [N,N]
+            sim.fill_diagonal_(-1e9)  # 排除自身
+            order = sim.argsort(dim=1, descending=True)
+        else:
+            dist = torch.cdist(embeddings, embeddings, p=2)  # [N,N]
+            dist.fill_diagonal_(1e9)
+            order = dist.argsort(dim=1, descending=False)
+
+        # 真值矩阵（同类为 True），对角线 False
+        lbl = labels.view(-1, 1)
+        is_match = (lbl == lbl.t())
+        is_match.fill_diagonal_(False)
+
+        # CMC@k
+        metrics = {}
+        for k in topk:
+            topk_idx = order[:, :k]  # [N,k]
+            hits_topk = is_match.gather(1, topk_idx).any(dim=1)  # [N]
+            metrics[f"cmc@{k}"] = hits_topk.float().mean().item()
+
+        # mAP
+        ap_list = []
+        for i in range(N):
+            idx = order[i]
+            gt = is_match[i].gather(0, idx)  # [N-1]
+            num_rel = int(gt.sum().item())
+            if num_rel == 0:
+                continue
+            hits = gt.float()
+            cumsum = torch.cumsum(hits, dim=0)
+            ranks = torch.arange(1, hits.numel() + 1, device=device, dtype=torch.float32)
+            precision_at_k = cumsum / ranks
+            ap = (precision_at_k * hits).sum() / num_rel
+            ap_list.append(ap.item())
+        metrics["map"] = float(sum(ap_list) / max(1, len(ap_list)))
+        return metrics
 
     @torch.no_grad()
     def _calculate_metrics(self, model, batch) -> Dict[str, float]:
@@ -241,6 +290,52 @@ class ReIDTrainer(BaseTrainer):
         if self._val_main == "loss":
             return float(metrics.get("val_loss", 1e9))
         return float(metrics.get("r1", 0.0))
+
+    @torch.no_grad()
+    def evaluate(self, data_loader) -> Dict[str, float]:
+        """
+        覆写基类 evaluate：在保留原有 batch 级统计的同时，
+        额外收集整集 embedding/labels 计算 CMC/mAP（ReID 常用检索指标）。
+        """
+        net = self.ema.ema if getattr(self, "ema", None) else self.model
+        net.eval()
+
+        meters = {}                   # 累加器（保持和 BaseTrainer 的接口一致）
+        all_embs, all_lbls = [], []   # 收集整集特征用于 CMC/mAP
+
+        for batch in data_loader:
+            imgs, labels = self._move_batch_to_device(batch)
+            emb = net(imgs)
+
+            # 计算 val_loss / r1 / d_pos / d_neg（沿用你现有的实现）
+            loss, loss_dict = self.crit(emb, labels)
+            r1, d_pos, d_neg = self._recall_at_1_in_batch(emb, labels)
+            metrics_dict = {
+                "val_loss": float(loss.detach().cpu()),
+                "r1": float(r1),
+                "d_pos": float(d_pos),
+                "d_neg": float(d_neg),
+            }
+            for k, v in loss_dict.items():
+                metrics_dict[f"val_{k}"] = float(v)
+
+            self._update_meters(meters, metrics_dict, batch_size=imgs.size(0))
+
+            # 收集整集
+            all_embs.append(emb.detach())
+            all_lbls.append(labels.detach())
+
+        # —— 整集评估 CMC/mAP —— #
+        embs = torch.cat(all_embs, dim=0)
+        lbls = torch.cat(all_lbls, dim=0)
+        cmc_map = self._eval_cmc_map(embs, lbls, topk=(1,5,10), metric='cosine')
+
+        # 把 CMC/mAP 也纳入 meters 的“均值化接口”里（直接按样本数权重=1 累加）
+        for k, v in cmc_map.items():
+            self._update_meters(meters, {k: float(v)}, batch_size=lbls.size(0))
+
+        # 返回基类期望的“均值后字典”
+        return self._get_mean_meters(meters)
 
     # ============ 评价辅助 ============
     @staticmethod

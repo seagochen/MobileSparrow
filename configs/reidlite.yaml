@@ -30,7 +30,7 @@ trainer:
     w_tri: 1.0
     triplet_margin: 0.3
     label_smooth_eps: 0.1
-    main_metric: r1         # 若切换为 'loss'，请把 mode 也改为 'min'
+    main_metric:  cmc@1         # 主指标： 若切换为 'loss'，请把 mode 也改为 'min'
     mode: max
 
     optimizer_cfg:
