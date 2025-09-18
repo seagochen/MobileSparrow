@@ -162,7 +162,7 @@ class BaseTrainer:
 
             self._update_meters(meters, loss_dict, batch_size=next(iter(batch)).shape[0])
 
-            if i % self.log_interval == 0:
+            if (i % self.log_interval == 0) or (i == iters_per_epoch - 1):
                 self._log_iter_stats(epoch, self.epochs, i, iters_per_epoch, meters)
         print()
         return self._get_mean_meters(meters)
