@@ -7,6 +7,7 @@ COCO detection subset generator for SSDLite (lean)
 - 通过 --splits 控制读入 train、val（默认 "train,val"）
 - 类过滤（按 name 或 id）
 - 过滤 iscrowd / 小框
+- 每类最多 N 张图（图像级贪心采样，--per-class-max）
 - 图像复制（始终复制，绝不软链接/重编码）
 输出结构：
 <out_dir>/
@@ -19,6 +20,7 @@ COCO detection subset generator for SSDLite (lean)
 """
 import sys
 import argparse
+import random
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
 
@@ -38,8 +40,8 @@ def parse_args():
         description="Prepare COCO detection subset for SSDLite (lean)."
     )
     p.add_argument(
-        "--root", 
-        type=Path, 
+        "--root",
+        type=Path,
         default=Path("data/coco2017"),
         help="COCO root dir. Must contain 'annotations', and each requested split dir like 'train2017'/'val2017'."
     )
@@ -80,6 +82,21 @@ def parse_args():
         action="store_true",
         help="Skip annotations with iscrowd=1."
     )
+    
+    # 图像级采样参数
+    p.add_argument(
+        "--per-class-max",
+        type=int,
+        default=0,
+        help="Cap *images per class* AFTER filtering & remap (0 = unlimited)."
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for per-class sampling."
+    )
+
     p.add_argument(
         "--verbose",
         action="store_true",
@@ -166,6 +183,55 @@ def filter_and_remap_instances(coco: Dict,
 
     return images, kept_anns, categories
 
+
+# ----------------------------
+# 图像级贪心限额（每类最多 N 张图）
+# ----------------------------
+def greedy_cap_per_class(images: List[Dict], anns: List[Dict], categories: List[Dict],
+                         per_class_max: int, seed: int = 0, verbose: bool = False) -> Tuple[List[Dict], List[Dict]]:
+    """
+    images/anns 已经是“过滤 + 类ID重映射后”的结果：
+      - categories[i]['id'] ∈ [1..C]
+      - anns[*]['category_id'] 也在 [1..C]
+    这里做“图像级”采样：每个类别至多出现于 per_class_max 张图片中。
+    """
+    if per_class_max <= 0 or len(categories) == 0:
+        return images, anns
+
+    # 构建：每张图包含哪些“新类”
+    img2cats = {int(im["id"]): set() for im in images}
+    for a in anns:
+        img2cats[int(a["image_id"])].add(int(a["category_id"]))
+
+    rnd = random.Random(seed)
+    img_ids = list(img2cats.keys())
+    rnd.shuffle(img_ids)
+
+    cls_used = {int(c["id"]): 0 for c in categories}
+    kept_ids: Set[int] = set()
+
+    for iid in img_ids:
+        cats = img2cats[iid]
+        # 该图像是否有助于任何“未达标”的类
+        if any(cls_used[c] < per_class_max for c in cats):
+            kept_ids.add(iid)
+            for c in cats:
+                if cls_used[c] < per_class_max:
+                    cls_used[c] += 1
+        if all(v >= per_class_max for v in cls_used.values()):
+            break
+
+    images_new = [im for im in images if int(im["id"]) in kept_ids]
+    kept_ids = {int(im["id"]) for im in images_new}
+    anns_new = [a for a in anns if int(a["image_id"]) in kept_ids]
+
+    if verbose:
+        print(f"[cap] per_class_max={per_class_max}, seed={seed} -> images={len(images_new)}, anns={len(anns_new)}")
+        print("[cap] per-class totals (clipped):", {k: min(v, per_class_max) for k, v in cls_used.items()})
+
+    return images_new, anns_new
+
+
 # ----------------------------
 # 主流程：保持 COCO 原始 train/val
 # ----------------------------
@@ -173,14 +239,22 @@ def run_coco_mode(root: Path, out_dir: Path,
                   splits: List[str],
                   keep_ids: Optional[Set[int]],
                   min_box_area: float, skip_crowd: bool,
+                  per_class_max: int, seed: int,
                   verbose: bool):
     for split in splits:
         ann_path = root / "annotations" / f"instances_{split}2017.json"
         coco = common.load_json(ann_path)
         info = coco.get("info", {})
         licenses = coco.get("licenses", [])
+
+        # 1) 过滤 & 重映射
         images, anns, categories = filter_and_remap_instances(
             coco, keep_ids, min_box_area, skip_crowd, verbose
+        )
+
+        # 2) （新增）图像级限额
+        images, anns = greedy_cap_per_class(
+            images, anns, categories, per_class_max=per_class_max, seed=seed, verbose=verbose
         )
 
         # 落盘图像（始终复制）
@@ -196,7 +270,7 @@ def run_coco_mode(root: Path, out_dir: Path,
         # 写 json
         out_ann = out_dir / "annotations" / f"instances_{split}2017.json"
         common.write_coco_json(out_ann, info, licenses, images, anns, categories,
-                        desc_suffix=f"COCO 2017 {split} detection subset (filtered/contiguous ids).")
+                               desc_suffix=f"COCO 2017 {split} detection subset (filtered/contiguous ids).")
         print(f"[{split}] images={len(images)} anns={len(anns)} classes={len(categories)} -> {out_ann}")
 
 
@@ -223,9 +297,11 @@ def main():
     run_coco_mode(
         root=args.root, out_dir=args.out_dir, splits=src_splits,
         keep_ids=keep_ids, min_box_area=args.min_box_area, skip_crowd=args.skip_crowd,
+        per_class_max=int(args.per_class_max), seed=int(args.seed),
         verbose=args.verbose
     )
 
 
 if __name__ == "__main__":
     main()
+
