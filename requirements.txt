@@ -15,3 +15,4 @@ nvitop
 pycocotools
 pyyaml
 kagglehub
+matplotlib
