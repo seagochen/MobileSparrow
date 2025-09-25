@@ -26,92 +26,12 @@ from albumentations.pytorch import ToTensorV2
 # ## 辅助工具函数
 
 # %% [markdown]
-# ### `letterbox`
-
-# %%
-def letterbox(img: np.ndarray, dst_size: int, color=(114, 114, 114)) -> Tuple[np.ndarray, float, Tuple[int, int]]:
-    """
-    把任意 HxW 图像 letterbox 到 dst_size×dst_size，返回 (新图, 缩放比例, (pad_w, pad_h))
-    - scale = dst_size / max(H, W)
-    - 新图大小固定 dst_size×dst_size
-    """
-    h, w = img.shape[:2]
-    scale = float(dst_size) / max(h, w)
-    nh, nw = int(round(h * scale)), int(round(w * scale))
-    img_resz = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
-
-    new_img = np.full((dst_size, dst_size, 3), color, dtype=img.dtype)
-    pad_w = (dst_size - nw) // 2
-    pad_h = (dst_size - nh) // 2
-    new_img[pad_h:pad_h + nh, pad_w:pad_w + nw] = img_resz
-    return new_img, scale, (pad_w, pad_h)
-
-# %% [markdown]
-# ### `apply_hsv`
-
-# %%
-def apply_hsv(img: np.ndarray, hgain=0.015, sgain=0.7, vgain=0.4):
-    if hgain == 0 and sgain == 0 and vgain == 0:
-        return img
-    r = np.random.uniform(-1, 1, 3) * np.array([hgain, sgain, vgain]) + 1.0
-    img_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-    img_hsv[..., 0] = (img_hsv[..., 0] * r[0]) % 180.0
-    img_hsv[..., 1] = np.clip(img_hsv[..., 1] * r[1], 0, 255.0)
-    img_hsv[..., 2] = np.clip(img_hsv[..., 2] * r[2], 0, 255.0)
-    img = cv2.cvtColor(img_hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-    return img
-
-# %% [markdown]
-# ### `random_affine_points`
-
-# %%
-def random_affine_points(pts: np.ndarray, M: np.ndarray) -> np.ndarray:
-    """pts: [N,2]，仿射矩阵 2x3，输出映射后的 [N,2]"""
-    if pts.size == 0:
-        return pts
-    ones = np.ones((pts.shape[0], 1), dtype=np.float32)
-    pts_aug = np.concatenate([pts, ones], axis=1)  # [N,3]
-    pts_new = (M @ pts_aug.T).T  # [N,2]
-    return pts_new
-
-# %% [markdown]
 # ### `xywh_to_xyxy`
 
 # %%
 def xywh_to_xyxy(box_xywh: np.ndarray) -> np.ndarray:
     x, y, w, h = box_xywh
     return np.array([x, y, x + w, y + h], dtype=np.float32)
-
-# %% [markdown]
-# ### `xyxy_to_corners`
-
-# %%
-def xyxy_to_corners(box_xyxy: np.ndarray) -> np.ndarray:
-    x1, y1, x2, y2 = box_xyxy
-    return np.array([[x1, y1],
-                     [x2, y1],
-                     [x2, y2],
-                     [x1, y2]], dtype=np.float32)
-
-# %% [markdown]
-# ### `corners_to_xyxy`
-
-# %%
-def corners_to_xyxy(pts: np.ndarray) -> np.ndarray:
-    xs = pts[:, 0]; ys = pts[:, 1]
-    return np.array([xs.min(), ys.min(), xs.max(), ys.max()], dtype=np.float32)
-
-# %% [markdown]
-# ### `clip_box_xyxy`
-
-# %%
-def clip_box_xyxy(box: np.ndarray, w: int, h: int) -> np.ndarray:
-    x1, y1, x2, y2 = box
-    x1 = float(np.clip(x1, 0, w - 1))
-    y1 = float(np.clip(y1, 0, h - 1))
-    x2 = float(np.clip(x2, 0, w - 1))
-    y2 = float(np.clip(y2, 0, h - 1))
-    return np.array([x1, y1, x2, y2], dtype=np.float32)
 
 # %% [markdown]
 # ## 数据集加载类
@@ -397,7 +317,5 @@ if __name__ == "__main__":
         # 检查类别数
         num_classes_from_dataset = train_loader.dataset.num_classes
         print(f"\nDetected {num_classes_from_dataset} classes from COCO annotations (e.g., 80 for COCO).")
-        print(f"!!!For training the SSDLite model, set your num_classes = num_classes_from_dataset + 1.!!!")
-        # 你的模型 num_classes 应该设置为 (num_classes_from_dataset + 1) 如果需要背景类
 
 
