@@ -38,7 +38,7 @@ model:
 trainer:
   class: dets_trainer           # -> sparrow.task.dets_trainer.DetsTrainer
   args:
-    epochs: 300
+    epochs: 100
     save_dir: outputs/ssdlite
     img_size: 320
 

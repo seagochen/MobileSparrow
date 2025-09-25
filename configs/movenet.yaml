@@ -34,7 +34,7 @@ model:
 trainer:
   class: kpts_trainer
   args:
-    epochs: 200
+    epochs: 150
     save_dir: outputs/movenet
     img_size: 192
 
