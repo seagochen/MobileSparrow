@@ -1,294 +1,341 @@
-# -*- coding: utf-8 -*-
-"""
-SSDLite 损失（含强制匹配 + Hard Negative Mining）
-- 分类：CrossEntropy + OHEM(neg:pos=3:1，默认)
-- 回归：SmoothL1（对正样本）
-- 编码：相对 anchor(cxcywh) 的平移/缩放偏移，使用 variances=(0.1,0.2)
-期望输入：
-  cls_logits: [B, A_total, C]  (C 含背景类，背景=0)
-  bbox_regs : [B, A_total, 4]  (预测的编码 offsets)
-  anchors   : [A_total, 4]     (cxcywh，归一化到[0,1])
-  targets   : {
-      "boxes":  List[Gi, 4] (xyxy，归一化到[0,1])
-      "labels": List[Gi]    (1..C-1；0 预留背景，不应出现在此处)
-  }
-"""
-from typing import Dict, List, Tuple
+# %% [markdown]
+# # 损失函数
+# 
+# 好的，我们已经准备好了现代化的 `SSDLite_FPN` 模型和强大的 `Albumentations` 数据加载器。现在，最后一块拼图就是为这个目标检测模型设计和实现一个合适的损失函数 (Loss Function)。
+# 
+# 对于像 SSD、RetinaNet 或我们这个 `SSDLite_FPN` 这样的单阶段（One-Stage）检测器，损失函数通常由两部分组成：
+# 
+# 1.  **分类损失 (Classification Loss)**：惩罚预测框的类别错误。
+# 2.  **定位损失 (Localization/Regression Loss)**：惩罚预测框与真实框（Ground Truth）之间的位置偏差。
+# 
+# 总损失是这两部分损失的加权和：$L\_{total} = L\_{cls} + \\alpha L\_{loc}$ （权重 $\\alpha$ 通常设为1）。
+# 
+# 在计算这两个损失之前，最关键的一步是**目标分配（Target Assignment）**，也就是为模型生成的成千上万个锚框（Anchor Boxes）中的每一个，分配一个真实的标签（是背景，还是某个物体？如果是物体，对应的真实框是哪一个？）。
+# 
+# 下面，我将为你分步实现一个完整的、适用于 `SSDLite_FPN` 的损失函数模块。
+# 
+# -----
+
+# %% [markdown]
+# ## 核心步骤
+# 
+# 我们将创建一个 `SSDLoss` 类，其核心逻辑分为三步：
+# 
+# 1.  **生成锚框 (Anchor Generation)**：为模型输出的每个尺寸的特征图（P3, P4, P5, P6, P7）预先生成一组固定的锚框。这一步在初始化时完成。
+# 2.  **目标分配 (Target Assignment)**：在每次训练迭代中，根据真实框（Ground Truth Boxes）和所有锚框的 IoU（交并比），为每个锚框分配匹配的真实物体或将其标记为背景。
+# 3.  **计算损失 (Loss Calculation)**：
+#       * **分类损失**：使用 **Focal Loss**。这是现代检测器中非常流行且有效的损失函数，它能自动关注于难分类的样本（hard examples），解决了正负样本（物体 vs. 背景）极度不平衡的问题。
+#       * **定位损失**：使用 **Smooth L1 Loss**。这是一种对离群值不那么敏感的回归损失，比 L2 Loss 更鲁棒。我们只对被分配为正样本（匹配到物体）的锚框计算定位损失。
+# 
+# -----
+
+# %% [markdown]
+# ### 第一步：安装依赖
+# 
+# 我们需要 `torchvision` 来方便地计算 IoU 和损失。同时使用 `tqdm` 来显示训练进度和错误率。
+
+# %%
+# !pip -q install torchvision
+# !pip -q install tqdm
+
+# %% [markdown]
+# ### 第二步：锚框生成器 (Anchor Generator)
+# 
+# 我们需要一个辅助类来为不同尺寸的特征图生成锚框。
+
+# %%
+# anchor_utils.py
+import torch
 import math
+from typing import List
+
+class AnchorGenerator:
+    """
+    为 FPN 输出的多个特征图生成锚框。
+    这个类现在主要在训练开始前，用于“预计算”步骤。
+    """
+    def __init__(self,
+                 sizes=(32, 64, 128, 256, 512),
+                 aspect_ratios=(0.5, 1.0, 2.0, 1/3.0, 3.0)):
+        super().__init__()
+        self.sizes = sizes
+        self.aspect_ratios = aspect_ratios
+        self.num_anchors_per_location = len(self.aspect_ratios)
+        self.cell_anchors = self._generate_cell_anchors()
+
+    def _generate_cell_anchors(self) -> List[torch.Tensor]:
+        cell_anchors = []
+        for s in self.sizes:
+            w = torch.tensor([s * math.sqrt(ar) for ar in self.aspect_ratios])
+            h = torch.tensor([s / math.sqrt(ar) for ar in self.aspect_ratios])
+            base_anchors = torch.stack([-w / 2, -h / 2, w / 2, h / 2], dim=1)
+            base_anchors = self.cxcywh_to_xyxy(base_anchors)
+            cell_anchors.append(base_anchors)
+        return cell_anchors
+
+    def cxcywh_to_xyxy(self, boxes: torch.Tensor) -> torch.Tensor:
+        return torch.cat([boxes[:, :2] - boxes[:, 2:] / 2,
+                          boxes[:, :2] + boxes[:, 2:] / 2], dim=1)
+    
+    def xyxy_to_cxcywh(self, boxes: torch.Tensor) -> torch.Tensor:
+        w = boxes[:, 2] - boxes[:, 0]
+        h = boxes[:, 3] - boxes[:, 1]
+        cx = boxes[:, 0] + w / 2
+        cy = boxes[:, 1] + h / 2
+        return torch.stack([cx, cy, w, h], dim=1)
+
+    def generate_anchors_on_grid(self, feature_maps: List[torch.Tensor], device: str) -> torch.Tensor:
+        all_anchors = []
+        # 假设输入是 320x320，如果你的输入尺寸变化，需要相应调整
+        input_size_h, input_size_w = 320, 320
+        for i, fm in enumerate(feature_maps):
+            fm_h, fm_w = fm.shape[-2:]
+            stride_h = input_size_h / fm_h
+            stride_w = input_size_w / fm_w
+            
+            shifts_x = torch.arange(0, fm_w, device=device) * stride_w
+            shifts_y = torch.arange(0, fm_h, device=device) * stride_h
+            shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x, indexing='ij')
+            shifts = torch.stack((shift_x.flatten(), shift_y.flatten(), shift_x.flatten(), shift_y.flatten()), dim=1)
+
+            anchors = (self.cell_anchors[i].to(device).view(1, -1, 4) + shifts.view(-1, 1, 4)).reshape(-1, 4)
+            all_anchors.append(anchors)
+        
+        return torch.cat(all_anchors, dim=0)
+
+# %% [markdown]
+# ### 第三步：完整的损失函数类 `SSDLoss`
+# 
+# 这个类将包含目标分配和损失计算的所有逻辑。
+
+# %%
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.ops import box_iou, sigmoid_focal_loss
+from typing import List
 
+# 假设 AnchorGenerator 在同一个文件中或已导入
+# from anchor_utils import AnchorGenerator
 
-# ----------------------- 基础几何工具 -----------------------
-def cxcywh_to_xyxy(cxcywh: torch.Tensor) -> torch.Tensor:
-    cx, cy, w, h = cxcywh.unbind(-1)
-    x1 = cx - 0.5 * w
-    y1 = cy - 0.5 * h
-    x2 = cx + 0.5 * w
-    y2 = cy + 0.5 * h
-    return torch.stack([x1, y1, x2, y2], dim=-1)
-
-def xyxy_to_cxcywh(xyxy: torch.Tensor) -> torch.Tensor:
-    x1, y1, x2, y2 = xyxy.unbind(-1)
-    w = (x2 - x1).clamp(min=1e-6)
-    h = (y2 - y1).clamp(min=1e-6)
-    cx = x1 + 0.5 * w
-    cy = y1 + 0.5 * h
-    return torch.stack([cx, cy, w, h], dim=-1)
-
-def iou_xyxy(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """
-    a:[N,4], b:[M,4] (xyxy, 归一化到[0,1])
-    返回: [N,M]
-    """
-    tl = torch.maximum(a[:, None, :2], b[None, :, :2])
-    br = torch.minimum(a[:, None, 2:], b[None, :, 2:])
-    wh = (br - tl).clamp(min=0)
-    inter = wh[..., 0] * wh[..., 1]
-    area_a = (a[:, 2] - a[:, 0]).clamp(min=0) * (a[:, 3] - a[:, 1]).clamp(min=0)
-    area_b = (b[:, 2] - b[:, 0]).clamp(min=0) * (b[:, 3] - b[:, 1]).clamp(min=0)
-    union = area_a[:, None] + area_b[None, :] - inter + 1e-9
-    return inter / union
-
-
-# ----------------------- 编码/解码 -----------------------
-def encode_gt_to_deltas(gt_xyxy: torch.Tensor,
-                        anc_cxcywh: torch.Tensor,
-                        variances: Tuple[float, float] = (0.1, 0.2)) -> torch.Tensor:
-    """
-    将 GT(xyxy) 编码为相对 anchors(cxcywh) 的偏移 (tx,ty,tw,th)
-    """
-    gt_cxcywh = xyxy_to_cxcywh(gt_xyxy)
-    gcx, gcy, gw, gh = gt_cxcywh.unbind(-1)
-    acx, acy, aw, ah = anc_cxcywh.unbind(-1)
-
-    vx, vs = variances
-    tx = (gcx - acx) / aw / vx
-    ty = (gcy - acy) / ah / vx
-    tw = torch.log((gw / aw).clamp(min=1e-6)) / vs
-    th = torch.log((gh / ah).clamp(min=1e-6)) / vs
-    return torch.stack([tx, ty, tw, th], dim=-1)
-
-def decode_deltas_to_xyxy(deltas: torch.Tensor,
-                          anc_cxcywh: torch.Tensor,
-                          variances: Tuple[float, float] = (0.1, 0.2)) -> torch.Tensor:
-    """
-    将预测偏移解码回 xyxy（推理用；训练时不必须）
-    """
-    vx, vs = variances
-    tx, ty, tw, th = deltas.unbind(-1)
-    acx, acy, aw, ah = anc_cxcywh.unbind(-1)
-
-    cx = tx * vx * aw + acx
-    cy = ty * vx * ah + acy
-    w  = torch.exp(tw * vs) * aw
-    h  = torch.exp(th * vs) * ah
-    return cxcywh_to_xyxy(torch.stack([cx, cy, w, h], dim=-1))
-
-
-# ----------------------- 匹配（强制匹配 + 三分法） -----------------------
-@torch.no_grad()
-def assign_anchors(anchors_cxcywh: torch.Tensor,
-                   gts_xyxy: torch.Tensor,
-                   gts_labels: torch.Tensor,
-                   pos_iou: float = 0.5,
-                   neg_iou: float = 0.4) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    返回:
-      cls_t: [A]  (0=bg, -1=ignore, 1..C-1=前景)
-      reg_t: [A,4] (编码后的回归目标)
-      pos:   [A]  bool 正样本掩码
-    """
-    A = anchors_cxcywh.shape[0]
-    device = anchors_cxcywh.device
-    cls_t = torch.zeros((A,), dtype=torch.long, device=device)
-    reg_t = torch.zeros((A, 4), dtype=torch.float32, device=device)
-    pos   = torch.zeros((A,), dtype=torch.bool, device=device)
-
-    if gts_xyxy.numel() == 0:
-        # 全部负样本
-        return cls_t, reg_t, pos
-
-    anc_xyxy = cxcywh_to_xyxy(anchors_cxcywh)  # [A,4]
-    iou = iou_xyxy(anc_xyxy, gts_xyxy)         # [A,G]
-    iou_max, iou_idx = iou.max(dim=1)          # 每个 anchor 的最佳 GT
-
-    # 三分：正 / 忽略 / 负
-    pos = iou_max >= pos_iou
-    ign = (iou_max > neg_iou) & (~pos)
-    cls_t[:]   = 0
-    cls_t[ign] = -1
-
-    # 强制匹配：每个 GT 至少有一个正样本
-    _, gt_best_anchor = iou.max(dim=0)         # [G]
-    pos[gt_best_anchor] = True
-    iou_idx[gt_best_anchor] = torch.arange(gts_xyxy.shape[0], device=device)
-
-    # 写入正样本的回归与类别
-    if pos.any():
-        matched_gt = gts_xyxy[iou_idx[pos]]     # [P,4]
-        matched_lb = gts_labels[iou_idx[pos]]   # [P]  (1..C-1)
-        reg_t[pos] = encode_gt_to_deltas(matched_gt, anchors_cxcywh[pos])
-        cls_t[pos] = matched_lb + 1  # <--- 在这里加上 1
-
-    return cls_t, reg_t, pos
-
-
-# ----------------------- 损失主体 -----------------------
 class SSDLoss(nn.Module):
-    def __init__(self,
+    def __init__(self, 
                  num_classes: int,
-                 alpha: float = 1.0,
-                 neg_pos_ratio: int = 3,
-                 reg_type: str = "smoothl1"):
-        """
-        num_classes: 包含背景类的总类别数（背景=0，前景=1..C-1）
-        alpha: 回归损失权重
-        neg_pos_ratio: OHEM 负正比
-        reg_type: 'smoothl1' 或 'l1'（默认 smoothl1）
-        """
+                 iou_threshold_pos: float = 0.5,
+                 iou_threshold_neg: float = 0.4):
         super().__init__()
-        self.num_classes   = int(num_classes)
-        self.alpha         = float(alpha)
-        self.neg_pos_ratio = int(neg_pos_ratio)
-        self.ce  = nn.CrossEntropyLoss(reduction='none')
-        if reg_type == "l1":
-            self.reg_loss = nn.L1Loss(reduction='none')
+        self.num_classes = num_classes
+        self.iou_threshold_pos = iou_threshold_pos
+        self.iou_threshold_neg = iou_threshold_neg
+        
+        # AnchorGenerator 实例仍然需要，用于坐标变换等辅助功能
+        self.anchor_generator = AnchorGenerator(
+            sizes=(32, 64, 128, 256, 512),
+            aspect_ratios=(0.5, 1.0, 2.0, 1/3.0, 3.0)
+        )
+        self.num_anchors_per_loc = self.anchor_generator.num_anchors_per_location
+
+    def assign_targets_to_anchors(self, anchors: torch.Tensor, targets: List[torch.Tensor]):
+        # 这个函数完全不变
+        batch_size = len(targets)
+        num_anchors = anchors.shape[0]
+        device = anchors.device
+        labels = torch.full((batch_size, num_anchors), self.num_classes, dtype=torch.int64, device=device)
+        matched_gt_boxes = torch.zeros((batch_size, num_anchors, 4), dtype=torch.float32, device=device)
+        for i in range(batch_size):
+            gt_boxes = targets[i][:, 1:]
+            gt_labels = targets[i][:, 0]
+            if gt_boxes.shape[0] == 0: continue
+            iou = box_iou(gt_boxes, anchors)
+            max_iou_per_gt, max_iou_idx_per_gt = iou.max(dim=1)
+            labels[i, max_iou_idx_per_gt] = gt_labels.to(torch.int64)
+            matched_gt_boxes[i, max_iou_idx_per_gt] = gt_boxes
+            max_iou_per_anchor, max_iou_idx_per_anchor = iou.max(dim=0)
+            pos_mask = max_iou_per_anchor >= self.iou_threshold_pos
+            labels[i, pos_mask] = gt_labels[max_iou_idx_per_anchor[pos_mask]].to(torch.int64)
+            matched_gt_boxes[i, pos_mask] = gt_boxes[max_iou_idx_per_anchor[pos_mask]]
+        return labels, matched_gt_boxes
+
+    def encode_bbox(self, anchors: torch.Tensor, gt_boxes: torch.Tensor):
+        # 这个函数完全不变
+        anchors_cxcywh = self.anchor_generator.xyxy_to_cxcywh(anchors)
+        gt_boxes_cxcywh = self.anchor_generator.xyxy_to_cxcywh(gt_boxes)
+        tx = (gt_boxes_cxcywh[:, 0] - anchors_cxcywh[:, 0]) / anchors_cxcywh[:, 2]
+        ty = (gt_boxes_cxcywh[:, 1] - anchors_cxcywh[:, 1]) / anchors_cxcywh[:, 3]
+        tw = torch.log(gt_boxes_cxcywh[:, 2] / anchors_cxcywh[:, 2])
+        th = torch.log(gt_boxes_cxcywh[:, 3] / anchors_cxcywh[:, 3])
+        return torch.stack([tx, ty, tw, th], dim=1)
+
+    def forward(self, anchors: torch.Tensor, cls_preds: torch.Tensor, reg_preds: torch.Tensor, targets: List[torch.Tensor]):
+        """
+        计算总损失。
+        - anchors:   [总锚框数, 4] 预先计算好的、在指定设备上的锚框
+        - cls_preds: [B, 总锚框数, num_classes] 分类预测
+        - reg_preds: [B, 总锚框数, 4]       回归预测
+        - targets:   List of Tensors, 每个 Tensor [N_i, 5] (cls, x1, y1, x2, y2)
+        """
+        device = cls_preds.device
+        
+        # 1. 动态生成锚框的步骤被移除，因为 anchors 是直接传入的
+        #    anchors = self.anchor_generator.generate_anchors_on_grid(feature_maps, device) <-- 移除
+
+        # 2. 目标分配 (使用传入的 anchors)
+        assigned_labels, assigned_gt_boxes = self.assign_targets_to_anchors(anchors.to(device), targets)
+        
+        # 3. 准备计算损失 (后续逻辑完全不变)
+        pos_mask = (assigned_labels < self.num_classes) & (assigned_labels >= 0)
+        num_pos = pos_mask.sum().item()
+        
+        # --- 分类损失 (Focal Loss) ---
+        target_classes_one_hot = F.one_hot(assigned_labels, num_classes=self.num_classes + 1)
+        target_classes_one_hot = target_classes_one_hot[..., :self.num_classes].float()
+        loss_cls = sigmoid_focal_loss(
+            cls_preds, target_classes_one_hot, alpha=0.25, gamma=2.0, reduction='sum'
+        )
+
+        # --- 定位损失 (Smooth L1 Loss) ---
+        if num_pos > 0:
+            pos_reg_preds = reg_preds[pos_mask]
+            pos_assigned_gt_boxes = assigned_gt_boxes[pos_mask]
+            pos_anchors = anchors.to(device).unsqueeze(0).expand_as(assigned_gt_boxes)[pos_mask]
+            target_deltas = self.encode_bbox(pos_anchors, pos_assigned_gt_boxes)
+            loss_reg = F.smooth_l1_loss(pos_reg_preds, target_deltas, beta=1.0, reduction='sum')
         else:
-            self.reg_loss = nn.SmoothL1Loss(reduction='none')
+            loss_reg = torch.tensor(0.0, device=device)
 
-    def forward(self,
-                cls_logits: torch.Tensor,    # [B, A, C]
-                bbox_regs:  torch.Tensor,    # [B, A, 4]
-                anchors_cxcywh: torch.Tensor,# [A, 4]  归一化
-                targets: Dict[str, List[torch.Tensor]]  # {"boxes": [Gi,4], "labels":[Gi]}
-                ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        B, A, C = cls_logits.shape
-        assert C == self.num_classes, f"num_classes mismatch: {C} vs {self.num_classes}"
-        assert bbox_regs.shape[:2] == (B, A)
-        assert anchors_cxcywh.shape[0] == A
+        # 归一化
+        loss_cls = loss_cls / max(1, num_pos)
+        loss_reg = loss_reg / max(1, num_pos)
+        
+        return loss_cls, loss_reg
 
-        total_cls = 0.0
-        total_reg = 0.0
-        total_img = 0
+# %% [markdown]
+# ### 第四步：如何将所有部分整合到训练循环中
+# 
+# 现在你可以将这个 `SSDLoss` 类与你的模型和数据加载器一起使用。
+# 
+# 
+# ```python
+# 
+# import timm
+# from tqdm import tqdm
+# from ssdlite_fpn import SSDLite_FPN
+# from dataloader import create_dets_dataloader
+# 
+# # --- 1. 实例化所有组件 ---
+# device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# INPUT_SIZE = 320
+# BATCH_SIZE = 8
+# NUM_CLASSES = 80 # COCO
+# ANCHOR_SIZES = [32, 64, 128, 256, 512]
+# ANCHOR_RATIOS = [0.5, 1.0, 2.0, 1/3.0, 3.0]
+# 
+# # 模型 (接口保持干净，无需改动)
+# backbone_fpn = timm.create_model('mobilenetv3_large_100', pretrained=True, features_only=True, out_indices=(2, 3, 4))
+# model_fpn = SSDLite_FPN(backbone_fpn, num_classes=NUM_CLASSES, fpn_out_channels=128, num_anchors=len(ANCHOR_RATIOS))
+# model_fpn.to(device)
+# 
+# # 数据加载器 (来自 dataloader.py)
+# train_aug_config = { "rotate_deg": 15.0, "min_box_size": 2.0 }
+# train_loader = create_dets_dataloader(
+#     dataset_root="/home/user/projects/MobileSparrow/data/coco2017" ,
+#     img_size=320,
+#     batch_size=8,
+#     num_workers=4,
+#     pin_memory=True,
+#     aug_cfg=train_aug_config,
+#     is_train=True
+# )
+# 
+# # 损失函数 (使用我们重构后的版本)
+# criterion = SSDLoss(num_classes=NUM_CLASSES)
+# 
+# # 4. 优化器
+# optimizer = torch.optim.AdamW(model_fpn.parameters(), lr=1e-4, weight_decay=1e-3)
+# 
+# 
+# # --- 2. 预计算锚框 (核心步骤) ---
+# print("Pre-computing anchors for fixed input size...")
+# anchor_generator = AnchorGenerator(
+#     sizes=ANCHOR_SIZES,
+#     aspect_ratios=ANCHOR_RATIOS
+# )
+# 
+# # 创建一个虚拟输入
+# dummy_input = torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE).to(device)
+# 
+# # 设置为 eval 模式，并确保没有梯度计算
+# model_fpn.eval()
+# with torch.no_grad():
+#     # 手动执行一次特征提取流程，以获取特征图尺寸
+#     features = model_fpn.backbone(dummy_input)
+#     p3, p4, p5 = model_fpn.fpn(features)
+#     p6 = model_fpn.extra_layers[0](p5)
+#     p7 = model_fpn.extra_layers[1](p6)
+#     feature_maps_for_size_calc = [p3, p4, p5, p6, p7]
+# 
+# # 使用获取的特征图列表生成一次性的、完整的锚框网格
+# # 这个 precomputed_anchors 将在整个训练过程中被重复使用
+# precomputed_anchors = anchor_generator.generate_anchors_on_grid(feature_maps_for_size_calc, device)
+# print(f"Anchors pre-computed. Shape: {precomputed_anchors.shape}")
+# 
+# 
+# # --- 3. 训练循环 ---
+# print("\n--- Starting Training ---")
+# model_fpn.train() # 切换回训练模式
+# 
+# # 定义日志打印的频率
+# LOG_INTERVAL_SAMPLES = 1000
+# log_interval_batches = max(1, LOG_INTERVAL_SAMPLES // BATCH_SIZE)
+# print(f"Logging average loss every {log_interval_batches} batches.")
+# 
+# for epoch in range(5):
+#     # --- 为每个 epoch 初始化累加器 ---
+#     epoch_loss_cls = 0.0
+#     epoch_loss_reg = 0.0
+#     
+#     # 使用 tqdm 包装数据加载器，以创建进度条
+#     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{5-1} [Training]")
+#     
+#     for i, (imgs, targets, _) in enumerate(pbar):
+#         imgs = imgs.to(device)
+#         targets_on_device = [t.to(device) for t in targets]
+# 
+#         # 前向传播
+#         cls_preds, reg_preds = model_fpn(imgs)
+# 
+#         # 计算损失
+#         loss_cls, loss_reg = criterion(precomputed_anchors, cls_preds, reg_preds, targets_on_device)
+#         total_loss = loss_cls + loss_reg
+# 
+#         # 反向传播和优化
+#         optimizer.zero_grad()
+#         total_loss.backward()
+#         optimizer.step()
+# 
+#         # --- 更新累加器 ---
+#         # .item() 可以将只有一个元素的 tensor 转换为 python 数字，并释放计算图
+#         epoch_loss_cls += loss_cls.item()
+#         epoch_loss_reg += loss_reg.item()
+#         
+#         # --- 更新 tqdm 进度条的后缀信息，实时显示当前批次的损失 ---
+#         pbar.set_postfix(
+#             cls=f"{loss_cls.item():.4f}", 
+#             reg=f"{loss_reg.item():.4f}", 
+#             total=f"{total_loss.item():.4f}"
+#         )
+#         
+#     # --- 每个 epoch 结束后，打印该 epoch 的总结 ---
+#     avg_epoch_cls_loss = epoch_loss_cls / len(train_loader)
+#     avg_epoch_reg_loss = epoch_loss_reg / len(train_loader)
+#     avg_epoch_total_loss = avg_epoch_cls_loss + avg_epoch_reg_loss
+#     
+#     print(f"\n---> Epoch {epoch} Summary <---")
+#     print(f"  Average Classification Loss: {avg_epoch_cls_loss:.4f}")
+#     print(f"  Average Regression Loss:   {avg_epoch_reg_loss:.4f}")
+#     print(f"  Average Total Loss:        {avg_epoch_total_loss:.4f}\n")
+# 
+# print("--- Training Finished ---")
+# ```
 
-        for b in range(B):
-            gt_boxes  = targets["boxes"][b]   # [Gi,4] (归一化 xyxy)
-            gt_labels = targets["labels"][b]  # [Gi]   (1..C-1)
-            cls_t, reg_t, pos_mask = assign_anchors(anchors_cxcywh, gt_boxes, gt_labels)
 
-            logits_b = cls_logits[b]          # [A,C]
-            # 有效样本（非 ignore）
-            valid = cls_t >= 0
-            if valid.any():
-                # 分类 OHEM
-                # 正样本索引（在 A 维度）
-                pos_idx = torch.nonzero((cls_t > 0) & valid, as_tuple=False).squeeze(1)
-                neg_idx = torch.nonzero((cls_t == 0) & valid, as_tuple=False).squeeze(1)
-
-                num_pos = int(pos_idx.numel())
-                if num_pos > 0:
-                    # 负样本难例挖掘（与正样本按比率筛 K 个负样本）
-                    K = min(self.neg_pos_ratio * num_pos, int(neg_idx.numel()))
-                    if K > 0:
-                        # 对负样本与“背景类 0”计算 CE，选最难的 K 个
-                        neg_ce = self.ce(logits_b[neg_idx], torch.zeros_like(neg_idx))
-                        topk = neg_ce.topk(K).indices
-                        sel_neg_idx = neg_idx[topk]
-                        # 正样本的 CE
-                        pos_ce = self.ce(logits_b[pos_idx], cls_t[pos_idx])
-                        cls_loss = torch.cat([pos_ce, neg_ce[topk]], dim=0).mean()
-                    else:
-                        cls_loss = self.ce(logits_b[pos_idx], cls_t[pos_idx]).mean()
-                else:
-                    # 没有正样本：取固定数量最难负样本稳定训练
-                    if neg_idx.numel() > 0:
-                        K = min(64, int(neg_idx.numel()))
-                        neg_ce = self.ce(logits_b[neg_idx], torch.zeros_like(neg_idx))
-                        topk = neg_ce.topk(K).indices
-                        cls_loss = neg_ce[topk].mean()
-                    else:
-                        cls_loss = logits_b.new_zeros(())
-                total_cls += cls_loss
-            else:
-                total_cls += logits_b.new_zeros(())
-
-            # 回归（仅正样本）
-            if pos_mask.any():
-                reg_pred = bbox_regs[b][pos_mask]  # [P,4]
-                reg_gt   = reg_t[pos_mask]         # [P,4]
-                reg_loss = self.reg_loss(reg_pred, reg_gt).mean()
-                total_reg += reg_loss
-            else:
-                total_reg += bbox_regs.new_zeros(())
-
-            total_img += 1
-
-        # 对 batch 求平均（更稳定）
-        if total_img > 0:
-            total_cls = total_cls / total_img
-            total_reg = total_reg / total_img
-
-        loss = total_cls + self.alpha * total_reg
-        meter = {
-            "loss_cls": float(total_cls.detach().cpu()),
-            "loss_reg": float(total_reg.detach().cpu()),
-        }
-        return loss, meter
-
-
-# ----------------------- 训练端便捷工具（可选） -----------------------
-def pack_targets_for_ssd(targets_list: List[torch.Tensor], img_size: int) -> Dict[str, List[torch.Tensor]]:
-    """
-    将 CocoDetDataset 的 batch 输出打包成 SSDLoss 需要的字典格式。
-    输入 targets_list: List[Tensor[Ni,5]] -> [cls, x1, y1, x2, y2] (像素坐标)
-    输出:
-      {"boxes": [Gi,4] (xyxy, 归一化), "labels": [Gi] (1..C-1)}
-    说明：
-      - 把类别 0..C-1 映射到 1..C-1（保留 0 给背景）
-      - 坐标 / img_size 做归一化
-    """
-    boxes_norm, labels = [], []
-    for t in targets_list:
-        if t.numel() == 0:
-            boxes_norm.append(t.new_zeros((0, 4)))
-            labels.append(torch.zeros((0,), dtype=torch.long, device=t.device))
-            continue
-        cls = t[:, 0].long()
-        b   = t[:, 1:5] / float(img_size)      # 归一化
-        b   = b.clamp(0, 1)
-        boxes_norm.append(b)
-        labels.append(cls)
-    return {"boxes": boxes_norm, "labels": labels}
-
-
-@torch.no_grad()
-def generate_ssd_anchors(img_size: int,
-                         feat_shapes: List[Tuple[int, int]],
-                         strides: List[int],
-                         ratios: Tuple[float, ...] = (1.0, 2.0, 0.5),
-                         scales: Tuple[float, ...] = (1.0, 1.26)) -> torch.Tensor:
-    """
-    生成标准 SSD anchors（cxcywh，归一化）。
-    - feat_shapes: 如 [(H3,W3),(H4,W4),(H5,W5)]
-    - strides:     与上对应（例如 [8,16,32]）
-    - ratios/scales: 每层 A = len(ratios)*len(scales)，需与 Head 对齐
-    """
-    device = torch.device('cpu')
-    all_anchors = []
-    for (H, W), s in zip(feat_shapes, strides):
-        ys = (torch.arange(H, device=device) + 0.5) * s
-        xs = (torch.arange(W, device=device) + 0.5) * s
-        cy, cx = torch.meshgrid(ys, xs, indexing='ij')  # [H,W]
-        cx = (cx / img_size).reshape(-1, 1)
-        cy = (cy / img_size).reshape(-1, 1)
-        anchors_lvl = []
-        for r in ratios:
-            for sc in scales:
-                w = (sc * s * math.sqrt(r)) / img_size
-                h = (sc * s / math.sqrt(r)) / img_size
-                wh = torch.full((H * W, 2), 0.0, device=device)
-                wh[:, 0] = w; wh[:, 1] = h
-                anchors_lvl.append(torch.cat([cx, cy, wh], dim=1))
-        all_anchors.append(torch.cat(anchors_lvl, dim=0))  # [H*W*A,4]
-    return torch.cat(all_anchors, dim=0)  # [A_total,4]
