@@ -87,18 +87,54 @@ def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors
     return avg_total_loss, avg_cls_loss, avg_reg_loss
 
 
+# 4. 绘图（固定dpi与坐标系，优先保存，避免show）
+def _draw_and_save(input_img, decoded_boxes, final_scores, final_labels, keep_indices,
+                   save_path=None, show=False):
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+
+    # 明确设定一个正常的 dpi，避免环境把 dpi 弄到超大
+    fig, ax = plt.subplots(1, figsize=(12, 9), dpi=100)
+
+    # 明确坐标范围 = [0,320]，避免某些异常数值把坐标轴拉爆
+    ax.set_xlim(0, 320)
+    ax.set_ylim(320, 0)  # 注意图像坐标原点在左上，因此 y 轴反向
+    ax.imshow(input_img, extent=[0, 320, 320, 0])
+
+    for i in keep_indices:
+        x1, y1, x2, y2 = decoded_boxes[i].detach().cpu().numpy().tolist()
+        label_idx = int(final_labels[i].cpu())
+        score = float(final_scores[i].cpu())
+        label_name = COCO_CLASSES[label_idx] if label_idx < len(COCO_CLASSES) else f'Cls {label_idx}'
+
+        rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                 linewidth=2, edgecolor='lime', facecolor='none')
+        ax.add_patch(rect)
+        ax.text(x1, max(0, y1 - 5), f'{label_name}: {score:.2f}',
+                color='black', bbox=dict(facecolor='lime', alpha=0.8), fontsize=10)
+
+    ax.axis('off')
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=120, bbox_inches='tight', pad_inches=0.1)
+        plt.close(fig)
+    elif show:
+        # 只在你明确要求时才 show，训练循环里建议不用
+        plt.show()
+        plt.close(fig)
+    else:
+        # 默认为了安全直接关闭，避免notebook渲染器接手导致大图
+        plt.close(fig)
+
 @torch.no_grad()
-def visualize_predictions(model, image_path, anchor_generator, device, precomputed_anchors, conf_thresh=0.3, nms_thresh=0.45):
-    """
-    对单张图片进行预测并可视化结果 (完整版，包含解码逻辑)。
-    """
+def visualize_predictions(model, image_path, anchor_generator, device, precomputed_anchors,
+                          conf_thresh=0.3, nms_thresh=0.45, save_path=None, show=False):
     model.eval()
-    
-    # 1. 加载和预处理图片 (不变)
+
+    # 1) 读取与letterbox到 320x320
     img_bgr = cv2.imread(image_path)
+    assert img_bgr is not None, f"Image not found: {image_path}"
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    
-    # ... (letterbox 和归一化代码不变) ...
     h, w = img_rgb.shape[:2]
     scale = 320 / max(h, w)
     resized_h, resized_w = int(h * scale), int(w * scale)
@@ -108,60 +144,48 @@ def visualize_predictions(model, image_path, anchor_generator, device, precomput
     pad_w = (320 - resized_w) // 2
     input_img[pad_h:pad_h+resized_h, pad_w:pad_w+resized_w] = img_resized
     img_tensor = (torch.from_numpy(input_img.transpose(2, 0, 1)).float() / 255.0).to(device).unsqueeze(0)
-    
-    # 2. 模型推理 (不变)
-    cls_preds, reg_preds = model(img_tensor)
-    
-    # 3. 后处理 (Post-processing)
-    scores = torch.sigmoid(cls_preds[0])
-    reg_deltas = reg_preds[0] # [Num_Anchors, 4]
 
-    max_scores, best_class_indices = scores.max(dim=1)
+    # 2) 前向
+    cls_preds, reg_preds = model(img_tensor)                # [1, A, C], [1, A, 4]
+    scores = torch.sigmoid(cls_preds[0])                    # [A, C]
+    reg_deltas = reg_preds[0]                               # [A, 4]
+
+    # 3) 置信度与类别
+    max_scores, best_class_indices = scores.max(dim=1)      # [A], [A]
     keep = max_scores > conf_thresh
-    
-    # --- 核心改动：解码边界框 ---
-    # 筛选出置信度符合要求的锚框和回归偏移量
-    selected_anchors = precomputed_anchors[keep]
-    selected_deltas = reg_deltas[keep]
-    
-    # 将锚框从 (x1, y1, x2, y2) 转换为 (cx, cy, w, h)
+    if keep.sum().item() == 0:
+        # 没有有效检测：仍然可保存原图，避免异常
+        _draw_and_save(input_img, torch.empty((0,4), device=device), torch.empty(0, device=device),
+                       torch.empty(0, dtype=torch.long, device=device), keep_indices=torch.tensor([], dtype=torch.long),
+                       save_path=save_path, show=show)
+        model.train()
+        return
+
+    # 4) 解码框（确保 anchors 在同设备）
+    anchors_dev = precomputed_anchors.to(device)
+    selected_anchors = anchors_dev[keep]                    # [K, 4]
+    selected_deltas  = reg_deltas[keep]                     # [K, 4]
+
     anchors_cxcywh = anchor_generator.xyxy_to_cxcywh(selected_anchors)
-    
-    # 解码：应用模型预测的偏移量
     pred_cx = selected_deltas[:, 0] * anchors_cxcywh[:, 2] + anchors_cxcywh[:, 0]
     pred_cy = selected_deltas[:, 1] * anchors_cxcywh[:, 3] + anchors_cxcywh[:, 1]
-    pred_w = torch.exp(selected_deltas[:, 2]) * anchors_cxcywh[:, 2]
-    pred_h = torch.exp(selected_deltas[:, 3]) * anchors_cxcywh[:, 3]
-    
-    # 将解码后的 (cx, cy, w, h) 坐标转换回 (x1, y1, x2, y2)
+    pred_w  = torch.exp(selected_deltas[:, 2]) * anchors_cxcywh[:, 2]
+    pred_h  = torch.exp(selected_deltas[:, 3]) * anchors_cxcywh[:, 3]
     decoded_boxes = anchor_generator.cxcywh_to_xyxy(torch.stack([pred_cx, pred_cy, pred_w, pred_h], dim=1))
 
-    # -----------------------------
-    
-    final_scores = max_scores[keep]
-    final_labels = best_class_indices[keep]
-    
-    # NMS (现在使用解码后的精确框)
+    # 4.1) 数值稳健处理 + 裁剪到[0,320]
+    decoded_boxes = torch.nan_to_num(decoded_boxes, nan=0.0, posinf=320.0, neginf=0.0)
+    decoded_boxes[:, 0::2] = decoded_boxes[:, 0::2].clamp(0, 320)
+    decoded_boxes[:, 1::2] = decoded_boxes[:, 1::2].clamp(0, 320)
+
+    final_scores = max_scores[keep].float()                 # [K]
+    final_labels = best_class_indices[keep].long()          # [K]
+
+    # 5) NMS
     keep_indices = nms(decoded_boxes, final_scores, nms_thresh)
-    
-    # 4. 绘图
-    fig, ax = plt.subplots(1, figsize=(12, 9))
-    ax.imshow(input_img)
-    
-    for i in keep_indices:
-        box = decoded_boxes[i].cpu().numpy()
-        label_idx = int(final_labels[i].cpu())
-        score = float(final_scores[i].cpu())
-        
-        # 使用 COCO 类别名称
-        label_name = COCO_CLASSES[label_idx] if label_idx < len(COCO_CLASSES) else f'Cls {label_idx}'
-        
-        x1, y1, x2, y2 = box
-        rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=2, edgecolor='lime', facecolor='none')
-        ax.add_patch(rect)
-        plt.text(x1, y1 - 5, f'{label_name}: {score:.2f}', color='black',
-                 bbox=dict(facecolor='lime', alpha=0.8))
-        
-    plt.axis('off')
-    plt.show()
-    model.train() # 恢复训练模式
+
+    # 6) 绘图（固定dpi与坐标范围；默认保存，不show）
+    _draw_and_save(input_img, decoded_boxes, final_scores, final_labels, keep_indices,
+                   save_path=save_path, show=show)
+
+    model.train()

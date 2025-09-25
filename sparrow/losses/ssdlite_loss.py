@@ -68,9 +68,15 @@ class AnchorGenerator:
         for s in self.sizes:
             w = torch.tensor([s * math.sqrt(ar) for ar in self.aspect_ratios])
             h = torch.tensor([s / math.sqrt(ar) for ar in self.aspect_ratios])
-            base_anchors = torch.stack([-w / 2, -h / 2, w / 2, h / 2], dim=1)
-            base_anchors = self.cxcywh_to_xyxy(base_anchors)
+            # base_anchors = torch.stack([-w / 2, -h / 2, w / 2, h / 2], dim=1)
+            # base_anchors = self.cxcywh_to_xyxy(base_anchors)
+            # cell_anchors.append(base_anchors)
+
+            # 按 cx,cy,w,h 构，再转 xyxy
+            base_cxcywh = torch.stack([torch.zeros_like(w), torch.zeros_like(h), w, h], dim=1)
+            base_anchors = self.cxcywh_to_xyxy(base_cxcywh)
             cell_anchors.append(base_anchors)
+
         return cell_anchors
 
     def cxcywh_to_xyxy(self, boxes: torch.Tensor) -> torch.Tensor:
@@ -166,7 +172,54 @@ class SSDLoss(nn.Module):
         th = torch.log(gt_boxes_cxcywh[:, 3] / anchors_cxcywh[:, 3])
         return torch.stack([tx, ty, tw, th], dim=1)
 
-    def forward(self, anchors: torch.Tensor, cls_preds: torch.Tensor, reg_preds: torch.Tensor, targets: List[torch.Tensor]):
+    # def forward(self, anchors: torch.Tensor, cls_preds: torch.Tensor, reg_preds: torch.Tensor, targets: List[torch.Tensor]):
+    #     """
+    #     计算总损失。
+    #     - anchors:   [总锚框数, 4] 预先计算好的、在指定设备上的锚框
+    #     - cls_preds: [B, 总锚框数, num_classes] 分类预测
+    #     - reg_preds: [B, 总锚框数, 4]       回归预测
+    #     - targets:   List of Tensors, 每个 Tensor [N_i, 5] (cls, x1, y1, x2, y2)
+    #     """
+    #     device = cls_preds.device
+        
+    #     # 1. 动态生成锚框的步骤被移除，因为 anchors 是直接传入的
+    #     #    anchors = self.anchor_generator.generate_anchors_on_grid(feature_maps, device) <-- 移除
+
+    #     # 2. 目标分配 (使用传入的 anchors)
+    #     assigned_labels, assigned_gt_boxes = self.assign_targets_to_anchors(anchors.to(device), targets)
+        
+    #     # 3. 准备计算损失 (后续逻辑完全不变)
+    #     pos_mask = (assigned_labels < self.num_classes) & (assigned_labels >= 0)
+    #     num_pos = pos_mask.sum().item()
+        
+    #     # --- 分类损失 (Focal Loss) ---
+    #     target_classes_one_hot = F.one_hot(assigned_labels, num_classes=self.num_classes + 1)
+    #     target_classes_one_hot = target_classes_one_hot[..., :self.num_classes].float()
+    #     loss_cls = sigmoid_focal_loss(
+    #         cls_preds, target_classes_one_hot, alpha=0.25, gamma=2.0, reduction='sum'
+    #     )
+
+    #     # --- 定位损失 (Smooth L1 Loss) ---
+    #     if num_pos > 0:
+    #         pos_reg_preds = reg_preds[pos_mask]
+    #         pos_assigned_gt_boxes = assigned_gt_boxes[pos_mask]
+    #         pos_anchors = anchors.to(device).unsqueeze(0).expand_as(assigned_gt_boxes)[pos_mask]
+    #         target_deltas = self.encode_bbox(pos_anchors, pos_assigned_gt_boxes)
+    #         loss_reg = F.smooth_l1_loss(pos_reg_preds, target_deltas, beta=1.0, reduction='sum')
+    #     else:
+    #         loss_reg = torch.tensor(0.0, device=device)
+
+    #     # 归一化
+    #     loss_cls = loss_cls / max(1, num_pos)
+    #     loss_reg = loss_reg / max(1, num_pos)
+        
+    #     return loss_cls, loss_reg
+
+    def forward(self, 
+            anchors: torch.Tensor, 
+            cls_preds: torch.Tensor, 
+            reg_preds: torch.Tensor, 
+            targets: List[torch.Tensor]):
         """
         计算总损失。
         - anchors:   [总锚框数, 4] 预先计算好的、在指定设备上的锚框
@@ -175,38 +228,36 @@ class SSDLoss(nn.Module):
         - targets:   List of Tensors, 每个 Tensor [N_i, 5] (cls, x1, y1, x2, y2)
         """
         device = cls_preds.device
-        
-        # 1. 动态生成锚框的步骤被移除，因为 anchors 是直接传入的
-        #    anchors = self.anchor_generator.generate_anchors_on_grid(feature_maps, device) <-- 移除
 
         # 2. 目标分配 (使用传入的 anchors)
         assigned_labels, assigned_gt_boxes = self.assign_targets_to_anchors(anchors.to(device), targets)
-        
+
         # 3. 准备计算损失 (后续逻辑完全不变)
         pos_mask = (assigned_labels < self.num_classes) & (assigned_labels >= 0)
         num_pos = pos_mask.sum().item()
-        
-        # --- 分类损失 (Focal Loss) ---
-        target_classes_one_hot = F.one_hot(assigned_labels, num_classes=self.num_classes + 1)
-        target_classes_one_hot = target_classes_one_hot[..., :self.num_classes].float()
-        loss_cls = sigmoid_focal_loss(
-            cls_preds, target_classes_one_hot, alpha=0.25, gamma=2.0, reduction='sum'
-        )
 
-        # --- 定位损失 (Smooth L1 Loss) ---
+        # === Classification Loss: Stabilized using 'mean' reduction ===
+        target_one_hot = F.one_hot(assigned_labels, num_classes=self.num_classes + 1)
+        target_one_hot = target_one_hot[..., :self.num_classes].float()
+
+        loss_cls_all = sigmoid_focal_loss(
+            cls_preds, target_one_hot, alpha=0.25, gamma=2.0, reduction='none'  # [B,A,C]
+        )
+        loss_cls = loss_cls_all.sum(dim=2).mean()  # 先按类别求和，再在B×A上取平均
+
+        # === Regression Loss: Calculation remains the same ===
         if num_pos > 0:
             pos_reg_preds = reg_preds[pos_mask]
-            pos_assigned_gt_boxes = assigned_gt_boxes[pos_mask]
+            pos_gt_boxes = assigned_gt_boxes[pos_mask]
             pos_anchors = anchors.to(device).unsqueeze(0).expand_as(assigned_gt_boxes)[pos_mask]
-            target_deltas = self.encode_bbox(pos_anchors, pos_assigned_gt_boxes)
+
+            target_deltas = self.encode_bbox(pos_anchors, pos_gt_boxes)
             loss_reg = F.smooth_l1_loss(pos_reg_preds, target_deltas, beta=1.0, reduction='sum')
+            # Still normalize regression loss by the number of positive samples
+            loss_reg = loss_reg / num_pos
         else:
             loss_reg = torch.tensor(0.0, device=device)
 
-        # 归一化
-        loss_cls = loss_cls / max(1, num_pos)
-        loss_reg = loss_reg / max(1, num_pos)
-        
         return loss_cls, loss_reg
 
 # %% [markdown]
