@@ -97,6 +97,7 @@ class CocoKeypointsDataset(Dataset):
                  img_size: int,
                  target_stride: int,
                  is_train: bool,
+                 skip_crowd: bool = True,
                  aug_cfg: Dict[str, Any] = None):
         super().__init__()
         self.img_root = os.path.abspath(img_root)
@@ -105,6 +106,7 @@ class CocoKeypointsDataset(Dataset):
         self.stride = int(target_stride)
         self.is_train = bool(is_train)
         self.aug_cfg = aug_cfg if aug_cfg is not None else {}
+        self.skip_crowd = bool(skip_crowd)
         
         assert self.img_size % self.stride == 0, \
             f"img_size({self.img_size}) must be divisible by stride({self.stride})"
@@ -174,7 +176,9 @@ class CocoKeypointsDataset(Dataset):
         self._ann_images = {im["id"]: im for im in images}
         person_id = next((c.get("id") for c in categories if c.get("name") == "person"), 1)
         anns_all = [a for a in annotations if a.get("category_id", person_id) == person_id]
-        if self.is_train:
+
+        # 过滤数据
+        if self.skip_crowd:
             anns_all = [a for a in anns_all if a.get("iscrowd", 0) == 0 and a.get("num_keypoints", 0) > 0]
 
         img_id_to_anns: Dict[int, List[Dict[str, Any]]] = {}
@@ -382,7 +386,7 @@ if __name__ == "__main__":
         # 2. 创建训练 Dataloader
         train_loader = create_kpts_dataloader(
             dataset_root=DATASET_ROOT,
-            img_size=320,
+            img_size=192,
             batch_size=4,
             target_stride=4, # 注意 stride 应该和你的模型输出 stride 匹配
             num_workers=2,
