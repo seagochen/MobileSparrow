@@ -111,7 +111,7 @@ def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors
     total_loss_cls = 0.0
     total_loss_reg = 0.0
 
-    pbar = tqdm(dataloader, desc="[Validating]")
+    pbar = tqdm(dataloader, desc="  [Validating]🟡 ")
     for imgs, targets, _ in pbar:
         imgs = imgs.to(device)
         targets_on_device = [t.to(device) for t in targets]
@@ -125,7 +125,7 @@ def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors
         total_loss_cls += loss_cls.item()
         total_loss_reg += loss_reg.item()
 
-        pbar.set_postfix(cls=f"{loss_cls.item():.4f}", reg=f"{loss_reg.item():.4f}")
+        pbar.set_postfix(cls=f"{loss_cls.item():.6f}", reg=f"{loss_reg.item():.6f}")
 
     avg_cls_loss = total_loss_cls / len(dataloader)
     avg_reg_loss = total_loss_reg / len(dataloader)
