@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from torchvision.ops import nms
-from typing import Tuple, List
+from typing import Tuple, List, Union
 
 
 # COCO 80 类名称（索引即类别 id 映射）
@@ -24,7 +24,7 @@ COCO_CLASSES = [
 # -----------------------------
 # 预处理：读图 + letterbox 到 320x320
 # -----------------------------
-def load_and_letterbox(image_path: str, dst: int = 320) -> Tuple[np.ndarray, np.ndarray, int, int, float, int, int]:
+def load_and_letterbox(image: Union[str, np.ndarray], dst: int = 320) -> Tuple[np.ndarray, np.ndarray, int, int, float, int, int]:
     """
     返回:
       img_rgb      : 原图 (H, W, 3), RGB
@@ -33,9 +33,14 @@ def load_and_letterbox(image_path: str, dst: int = 320) -> Tuple[np.ndarray, np.
       scale        : dst / max(h, w)
       pad_h, pad_w : 高/宽方向的 padding (各一半)
     """
-    img_bgr = cv2.imread(image_path)
-    assert img_bgr is not None, f"Image not found: {image_path}"
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    if isinstance(image, str):
+        img_bgr = cv2.imread(image)
+        assert img_bgr is not None, f"Image not found: {image}"
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    else:
+        img_bgr = image.copy()
+
+    # 获取图片的长宽
     h, w = img_rgb.shape[:2]
 
     scale = dst / max(h, w)
@@ -233,7 +238,7 @@ def draw_on_original(img_rgb: np.ndarray,
 @torch.no_grad()
 def visualize_predictions(
     model,
-    image_path: str,
+    image: Union[np.ndarray, str],
     device,
     precomputed_anchors: torch.Tensor,
     conf_thresh: float = 0.3,
@@ -243,7 +248,7 @@ def visualize_predictions(
     show: bool = False,
 ):
     # 1) 读图 + letterbox
-    img_rgb, input_img, H, W, scale, pad_h, pad_w = load_and_letterbox(image_path, dst=320)
+    img_rgb, input_img, H, W, scale, pad_h, pad_w = load_and_letterbox(image, dst=320)
 
     # 2) 前向
     scores, reg_delta = model_infer(model, input_img, device)              # [A,C], [A,4]
