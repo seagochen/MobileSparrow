@@ -516,55 +516,66 @@ class SSDLoss(nn.Module):
         return loss_cls, loss_reg
 
 # %% [markdown]
-# ## 如何在你的训练脚本中使用
-# 
-# 现在，你可以在你的主训练文件中实例化并使用这个 `SSDLoss`。
-# 
-# ```python
-# 
-# from ssdlite_fpn import SSDLite_FPN
-# from dataloader import create_dets_dataloader
-# from loss import SSDLoss # 导入我们刚创建的损失类
-# 
-# # 参数设置
-# NUM_CLASSES = 80 # COCO
-# ANCHOR_SIZES = [32, 64, 128, 256, 512]
-# ANCHOR_RATIOS = [0.5, 1.0, 2.0, 1/3.0, 3.0]
-# 
-# # ... (模型、数据加载器、优化器的初始化)
-# # model = SSDLite_FPN(...)
-# # train_loader = create_dets_dataloader(...)
-# # optimizer = torch.optim.AdamW(model_fpn.parameters(), lr=1e-4, weight_decay=1e-3)
-# 
-# # 实例化损失函数，可以使用默认权重，也可以自定义
-# criterion = SSDLoss(num_classes=NUM_CLASSES)
-# 
-# # 预计算锚框 
-# print("Pre-computing anchors for fixed input size...")
-# anchor_generator = AnchorGenerator(
-#     sizes=ANCHOR_SIZES,
-#     aspect_ratios=ANCHOR_RATIOS
-# )
-# 
-# # 这个 precomputed_anchors 将在整个训练过程中被重复使用
-# precomputed_anchors = anchor_generator.generate_anchors_on_grid(feature_maps_for_size_calc, device)
-# 
-# model.train()
-# for imgs, labels in train_loader:
-#         # targets_on_device = [t.to(device) for t in targets]
-# 
-#         # 前向传播
-#         cls_preds, reg_preds = model_fpn(imgs)
-# 
-#         # 计算损失
-#         loss_cls, loss_reg = criterion(precomputed_anchors, cls_preds, reg_preds, targets_on_device)
-#         total_loss = loss_cls + loss_reg
-# 
-#         # 反向传播和优化
-#         optimizer.zero_grad()
-#         total_loss.backward()
-#         optimizer.step()
-# 
-# ```
+# ### 评估函数
+
+# %%
+@torch.no_grad()
+def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors, device):
+    """
+    在验证集上评估模型，返回 (平均总损失, 平均分类损失, 平均回归损失)。
+
+    输入
+    ----
+    model : nn.Module
+        前向返回 (cls_preds, reg_preds) 的检测模型：
+        - cls_preds: [B, A, C]  (未 sigmoid)
+        - reg_preds: [B, A, 4]
+    dataloader : torch.utils.data.DataLoader
+        迭代返回 (imgs, targets, paths)：
+        - imgs    : [B, 3, H, W]，已归一化到与训练一致
+        - targets : List[Tensor]，长度 B；每项 [N_i, 5]=[cls, x1, y1, x2, y2]
+    criterion : nn.Module
+        损失计算器（如你上面的 SSDLoss），调用方式：
+        loss_cls, loss_reg = criterion(anchors, cls_preds, reg_preds, targets)
+    anchor_generator : AnchorGenerator
+        仅为接口统一，实际这里不直接用（由 criterion 使用）。
+    precomputed_anchors : Tensor
+        预先生成好的所有 anchors，形状 [A, 4]（与模型输出对齐）。
+    device : str | torch.device
+        推理设备。
+
+    备注
+    ----
+    - 内部会将 model 置为 eval 模式，并在函数结束后恢复 train 模式；
+    - 计算的是简单的 batch 平均再对 dataloader 取平均（没有按样本数加权）。
+    """
+    model.eval()
+
+    total_loss_cls = 0.0
+    total_loss_reg = 0.0
+
+    pbar = tqdm(dataloader, desc="  🟡 [Validating] ")
+    for imgs, targets, _ in pbar:
+        imgs = imgs.to(device)
+        targets_on_device = [t.to(device) for t in targets]
+
+        # 前向：要求模型返回 (cls_preds, reg_preds)
+        cls_preds, reg_preds = model(imgs)
+
+        # 计算损失（anchors 直接传入 criterion）
+        loss_cls, loss_reg = criterion(precomputed_anchors, cls_preds, reg_preds, targets_on_device)
+
+        total_loss_cls += loss_cls.item()
+        total_loss_reg += loss_reg.item()
+
+        pbar.set_postfix(cls=f"{total_loss_cls:.6f}", reg=f"{total_loss_reg:.6f}")
+
+    avg_cls_loss = total_loss_cls / len(dataloader)
+    avg_reg_loss = total_loss_reg / len(dataloader)
+    avg_total_loss = avg_cls_loss + avg_reg_loss
+
+    model.train()  # 恢复训练模式
+    return avg_total_loss, avg_cls_loss, avg_reg_loss
+
 
 
