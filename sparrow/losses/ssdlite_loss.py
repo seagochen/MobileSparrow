@@ -376,10 +376,12 @@ class SSDLoss(nn.Module):
         matched_gt_boxes = torch.zeros((batch_size, num_anchors, 4), dtype=torch.float32, device=device)
 
         for i in range(batch_size):
-            gt_boxes = targets[i][:, 1:]  # [N_i, 4]
-            gt_labels = targets[i][:, 0]  # [N_i]
+            # 将label由float改为int，而bbox继续保持 [x_min, y_min, x_max, y_max]
+            gt_boxes = targets[i][:, 1:]                    # [N_i, 4]
+            gt_labels = targets[i][:, 0].to(torch.int64)    # [N_i]
+
+            # 无 ground-truth, 保持背景
             if gt_boxes.shape[0] == 0:
-                # 无 GT：保持背景
                 continue
 
             # IoU 计算：行=GT，列=Anchor => [N_i, A]
@@ -438,9 +440,9 @@ class SSDLoss(nn.Module):
         tw = torch.log((gt_c[:, 2] / anchors_c[:, 2]).clamp(min=eps))
         th = torch.log((gt_c[:, 3] / anchors_c[:, 3]).clamp(min=eps))
 
-        # 缩放到更友好的量级（与推理 decode 对应）
         # 直接用 buffer；为防止混合精度/自定义 dtype，匹配到当前张量 dtype
-        std = self.bbox_std.to(anchors.dtype) # bbox -> move to device
+        device = anchors.device
+        std = self.bbox_std.to(device=device, dtype=anchors.dtype) # 显式的将std移动到对应的设备上CPU or CUDA
 
         # 保险：限制极端残差，避免单批“异常大梯度”
         deltas = torch.stack([tx, ty, tw, th], dim=1) / std
