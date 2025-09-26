@@ -1,188 +1,275 @@
-from typing import Dict, List, Tuple
+# %% [markdown]
+# # 如何构建一个SSDLite网络
+# 
+# 训练像 MobileNet 这样的模型，如果要从零开始（train from scratch），确实需要大量的计算资源（多GPU、长时间训练）、庞大的数据集（如 ImageNet），以及复杂的训练技巧（特定的学习率调度、正则化等）。这对于个人开发者或小型团队来说是非常消耗精力的。
+# 
+# 因此，更常见的做法是 **直接使用 `timm` 库中经过 ImageNet 预训练的模型作为 Backbone，是目前学术界和工业界最高效、最主流的做法**。这能让您把精力集中在下游任务（如 MoveNet, SSDLite）的架构设计和调优上，而不是耗费在 Backbone 的预训练上。
+# 
+# 接下来，我们就遵循这个思路，尝试用 `timm` 的 `mobilenetv3_large_100` 作为 Backbone，来一步步构建 SSDLite 的网络架构。
+# 
+# ----
 
+# %% [markdown]
+# ## SSDLite 架构思想
+# 
+# 在构建之前，我们先要理解 SSDLite 相比于经典 SSD (Single Shot MultiBox Detector) 的核心区别：
+# 
+# 1.  **轻量化主干网络 (Backbone)**：SSDLite 通常搭配像 MobileNetV2/V3 这样的轻量级网络，而不是 VGG 或 ResNet。这一点我们通过 `timm` 来实现。
+# 2.  **轻量化预测头 (Prediction Head)**：这是 **SSDLite 的精髓**。经典 SSD 在每个特征图上使用标准的 `3x3` 卷积来预测类别和边界框位置。而 SSDLite 将这些标准卷积替换为 **深度可分离卷积 (Depthwise Separable Convolutions)**。这极大地减少了检测头的参数量和计算量，使其与轻量级 Backbone 完美匹配。
+# 
+# ----
+
+# %% [markdown]
+# ## 构建步骤
+# 
+# 我们将分四步来构建 SSDLite 网络：
+# 
+# 1.  **步骤一：加载 `timm` MobileNetV3 Backbone 并提取多尺度特征**
+# 2.  **步骤二：构建额外的特征层 (Extra Layers)**
+# 3.  **步骤三：构建 SSDLite 预测头 (Prediction Heads)**
+# 4.  **步骤四：组装成完整的 SSDLite 网络**
+# 
+# -----
+
+# %%
+# !pip -q install timm
+
+# %% [markdown]
+# ### 步骤一：加载 `timm` Backbone 并提取特征
+# 
+# `timm` 提供了一个非常强大的功能 `features_only=True`，可以直接让模型输出中间层的特征图，这正是我们所需要的。
+
+# %%
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import timm
 
-from sparrow.models.backbones.mobilenet_v2 import MobileNetV2Backbone
-from sparrow.models.backbones.mobilenet_v3 import MobileNetV3Backbone
-from sparrow.models.backbones.shufflenet_v2 import ShuffleNetV2Backbone
+# 1. 加载 timm 中的 MobileNetV3 作为特征提取器
+# features_only=True: 让模型返回一个特征图列表，而不是最终的分类输出
+# out_indices: 指定我们想要输出哪些特征图的索引。
+#   对于 MobileNetV3 (large)，timm 默认返回5个特征层，stride 分别为 (2, 4, 8, 16, 32)
+#   我们选择索引 3 和 4，也就是 stride=16 和 stride=32 的特征图
+backbone = timm.create_model(
+    'mobilenetv3_large_100',
+    pretrained=True,
+    features_only=True,
+    out_indices=(3, 4), 
+)
 
+# 我们可以通过 model.feature_info 获取每个输出特征的详细信息
+feature_info = backbone.feature_info
+c4_channels = feature_info[0]['num_chs'] # stride 16
+c5_channels = feature_info[1]['num_chs'] # stride 32
 
-BACKBONES = {
-    "mobilenet_v2": MobileNetV2Backbone,
-    "shufflenet_v2": ShuffleNetV2Backbone,
-    "mobilenet_v3": MobileNetV3Backbone,
-}
+print(f"timm MobileNetV3 特征提取器加载成功！")
+print(f"选择的特征图通道数: C4({c4_channels} channels), C5({c5_channels} channels)")
 
+# 测试一下
+dummy_input = torch.randn(1, 3, 320, 320)
+features = backbone(dummy_input)
 
+print("\nBackbone 输出特征图的尺寸:")
+for i, f in enumerate(features):
+    print(f"特征层 {i}: {f.shape}")
+
+# %% [markdown]
+# ### 步骤二：构建额外的特征层 (Extra Layers)
+# 
+# 经典 SSD 架构会在 Backbone 的基础上额外添加几个卷积层，以获得更小的特征图来检测更大的物体。SSDLite 沿用了这个设计，但同样可以使用轻量化的卷积块。
+
+# %%
+# 简单的卷积块，用于额外特征层
+def extra_conv_block(in_channels, out_channels, stride):
+    return nn.Sequential(
+        nn.Conv2d(in_channels, out_channels, kernel_size=1),
+        nn.ReLU(inplace=True),
+        nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=stride, padding=1),
+        nn.ReLU(inplace=True),
+    )
+
+class ExtraLayers(nn.Module):
+    """
+    在 Backbone 最后一层特征图的基础上，构建更多下采样层
+    """
+    def __init__(self, in_channels, configs=[512, 256, 256, 128]):
+        super().__init__()
+
+        # 将配置集中存放，易于修改
+        self.configs = configs
+
+        self.layers = nn.ModuleList()
+        self.output_channels = [] # <--- 用于记录输出通道的列表
+
+        # 开始动态的创建卷积层
+        current_in_channels = in_channels
+        for out_channels in self.configs:
+
+            # 创建卷积块
+            block = extra_conv_block(current_in_channels, out_channels, stride=2)
+            self.layers.append(block)
+            
+            # 记录这个块的输出通道数
+            self.output_channels.append(out_channels)
+            
+            # 更新下一个块的输入通道数
+            current_in_channels = out_channels
+
+    def forward(self, x):
+        features = []
+        # 循环执行每个块
+        for layer in self.layers:
+            x = layer(x)
+            features.append(x)
+        return features
+    
+
+# %% [markdown]
+# ### 步骤三：构建 SSDLite 预测头
+# 
+# 这是定义 **SSDLite** 的关键。我们用深度可分离卷积来构建分类头 (Classification Head) 和回归头 (Regression Head)。
+
+# %%
+def SSDLitePredictionHead(in_channels, num_classes, num_anchors):
+    """
+    构建 SSDLite 的分类或回归头
+    
+    Args:
+        in_channels (int): 输入特征图的通道数
+        num_classes (int): 如果是分类头，则是类别数；如果是回归头，则是4 (dx,dy,dw,dh)
+        num_anchors (int): 每个位置的锚点框数量
+    """
+    # 使用深度可分离卷积
+    # 3x3 depthwise conv -> 1x1 pointwise conv
+    return nn.Sequential(
+        # 深度卷积
+        nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels),
+        nn.ReLU(inplace=True),
+        # 逐点卷积
+        nn.Conv2d(in_channels, num_anchors * num_classes, kernel_size=1),
+    )
+
+# %% [markdown]
+# ### 步骤四：组装成完整的 SSDLite 网络
+# 
+# 现在，我们将 Backbone、ExtraLayers 和 PredictionHeads 组装起来。
+
+# %%
 class SSDLite(nn.Module):
-    """
-    轻量 SSDLite 检测模型骨架（不含训练/损失/解码）：
-      - backbone: MobileNetV2 或 ShuffleNetV2
-      - neck: FPNLiteDet -> [P3,P4,P5]
-      - head: 每层一个 SSDLiteHead
-    """
-    def __init__(self,
-                 num_classes: int,
-                 backbone: str = "mobilenet_v2",
-                 width_mult: float = 1.0,
-                 neck_outc: int = 96,              # 建议略大于关键点任务, 64/96/128 皆可
-                 anchor_ratios: Tuple[float, ...] = (1.0, 2.0, 0.5),
-                 anchor_scales: Tuple[float, ...] = (1.0, 1.26),  # 每层2个scale作为示例
-                 anchor_strides: Tuple[float, ...] = (8, 16, 32)
-                 ):
+    def __init__(self, backbone, num_classes=21, num_anchors=6):
         super().__init__()
-        assert backbone in BACKBONES, f"unknown backbone: {backbone}"
-        self.num_classes = int(num_classes)
-        self.strides = anchor_strides
+        self.backbone = backbone
+        self.num_classes = num_classes  # 保存到实例属性
+        
+        # 用 timm 对齐 API，顺序与 out_indices 一致
+        chs = self.backbone.feature_info.channels()  # e.g. [C4, C5]
+        c4_channels, c5_channels = chs[0], chs[1]
+        
+        # 1. 额外特征层 (现在实例化的是新版 ExtraLayers)
+        self.extra_layers = ExtraLayers(c5_channels)
+        
+        # 2. 核心改进：动态构建特征图通道列表
+        backbone_channels = self.backbone.feature_info.channels()
+        extra_layer_channels = self.extra_layers.output_channels # 直接从模块获取！
 
-        # 1) Backbone
-        self.backbone = BACKBONES[backbone](width_mult=width_mult)
-        c3c, c4c, c5c = self.backbone.get_out_channels()
-
-        # 2) Neck (多尺度)
-        self.neck = FPNLite(c3=c3c, c4=c4c, c5=c5c, outc=neck_outc)
-
-        # 3) Heads for each pyramid level
-        #    anchors/位置数 A = len(ratios) * len(scales)
-        self.ratios = anchor_ratios
-        self.scales = anchor_scales
-        A = len(self.ratios) * len(self.scales)
-
-        self.heads = nn.ModuleList([
-            SSDLiteHead(neck_outc, num_anchors=A, num_classes=self.num_classes),  # P3
-            SSDLiteHead(neck_outc, num_anchors=A, num_classes=self.num_classes),  # P4
-            SSDLiteHead(neck_outc, num_anchors=A, num_classes=self.num_classes),  # P5
-        ])
-
-    def forward(self, x) -> Dict[str, List[torch.Tensor]]:
-        # Backbone -> C3,C4,C5
-        c3, c4, c5 = self.backbone(x)
-
-        # FPN -> [P3,P4,P5]
-        feats = self.neck(c3, c4, c5)  # 输出 p3, p4, p5 三个尺度的特征数据
-
-        # Multi-level heads
-        cls_list, reg_list = [], []
-        for f, head in zip(feats, self.heads):
-            cls, reg = head(f)  # [B, H*W*A, C], [B, H*W*A, 4]
-            cls_list.append(cls)
-            reg_list.append(reg)
-
-        return {
-            "cls_logits": cls_list,
-            "bbox_regs":  reg_list,
-            # 这里暂不返回 anchors（下一步我们再把 anchor 发生器接上）
-        }
-
-
-class DWSeparable(nn.Module):
-    """Depthwise-Separable Conv (SSDLite 风格)"""
-    def __init__(self, in_ch, out_ch, k=3, s=1, p=1):
-        super().__init__()
-        self.dw = nn.Conv2d(in_ch, in_ch, k, s, p, groups=in_ch, bias=False)
-        self.pw = nn.Conv2d(in_ch, out_ch, 1, 1, 0, bias=False)
-        self.bn1 = nn.BatchNorm2d(in_ch)
-        self.bn2 = nn.BatchNorm2d(out_ch)
-        self.act = nn.ReLU(inplace=True)
-
+        # 将来自 backbone 和 extra_layers 的通道号拼接起来，不再需要硬编码
+        self.feature_map_channels = backbone_channels + extra_layer_channels
+        
+        # 3. 后续的锚框列表创建和预测头创建逻辑完全不变
+        #    因为它们已经依赖于 self.feature_map_channels，所以会自动适应
+        self.num_anchors_list = [num_anchors] * len(self.feature_map_channels)
+        
+        self.cls_heads = nn.ModuleList()
+        self.reg_heads = nn.ModuleList()
+        
+        # 4. 自适应创建预测头
+        for i, in_channels in enumerate(self.feature_map_channels):
+            current_num_anchors = self.num_anchors_list[i]
+            self.cls_heads.append(
+                SSDLitePredictionHead(in_channels, self.num_classes, current_num_anchors)
+            )
+            self.reg_heads.append(
+                SSDLitePredictionHead(in_channels, 4, current_num_anchors)
+            )
+            
     def forward(self, x):
-        x = self.act(self.bn1(self.dw(x)))
-        x = self.act(self.bn2(self.pw(x)))
-        return x
+        # 1. 通过 Backbone 和 ExtraLayers 获取所有尺度的特征图
+        backbone_features = self.backbone(x)          # [C4, C5]
+        
+        # self.extra_layers() 现在直接返回一个列表
+        extra_features = self.extra_layers(backbone_features[-1])
+        all_features = backbone_features + extra_features
+        
+        cls_preds = []
+        reg_preds = []
+        
+        # 2. 对每个特征图应用对应的预测头
+        for i, feature in enumerate(all_features):
+            # 分类预测
+            cls_pred = self.cls_heads[i](feature)
+            # [B, num_anchors * num_classes, H, W] -> [B, H, W, num_anchors * num_classes]
+            cls_pred = cls_pred.permute(0, 2, 3, 1).contiguous()
+            # 展平: [B, H * W * num_anchors, num_classes]
+            cls_preds.append(cls_pred.view(x.size(0), -1, self.num_classes))
+            
+            # 回归预测
+            reg_pred = self.reg_heads[i](feature)
+            # [B, num_anchors * 4, H, W] -> [B, H, W, num_anchors * 4]
+            reg_pred = reg_pred.permute(0, 2, 3, 1).contiguous()
+            # 展平: [B, H * W * num_anchors, 4]
+            reg_preds.append(reg_pred.view(x.size(0), -1, 4))
+            
+        # 3. 将所有尺度的预测结果拼接起来
+        cls_preds = torch.cat(cls_preds, dim=1)
+        reg_preds = torch.cat(reg_preds, dim=1)
+        
+        return cls_preds, reg_preds
 
+# %% [markdown]
+# ### 实验与测试
 
-class SSDLiteHead(nn.Module):
-    """
-    单层特征图的 SSDLite 检测头：
-      - 输入：一个特征图 (B, C, H, W)
-      - 输出：cls_logits (B, H*W*A, num_classes), bbox_regs (B, H*W*A, 4)
-    其中 A = 每个位置的锚框数量（由外部配置 scales × ratios 决定）
-    """
-    def __init__(self, in_ch: int, num_anchors: int, num_classes: int, midc: int = None):
-        super().__init__()
-        self.num_anchors = num_anchors
-        self.num_classes = num_classes
-        midc = midc or max(32, in_ch // 2)
+# %%
+# --- 测试我们构建的完整 SSDLite 模型 ---
+if __name__ == "__main__":
+    # 实例化 Backbone
+    backbone = timm.create_model(
+        'mobilenetv3_large_100',
+        pretrained=True,
+        features_only=True,
+        out_indices=(3, 4),
+    )
+    
+    # 实例化 SSDLite
+    # 假设是 PASCAL VOC 数据集, 20个类别 + 1个背景 = 21
+    model = SSDLite(backbone, num_classes=21)
+    model.eval()
 
-        # SSDLite 两条支路：分类 & 回归（均用DW可分离卷积）
-        self.cls_conv = DWSeparable(in_ch, midc, 3, 1, 1)
-        self.reg_conv = DWSeparable(in_ch, midc, 3, 1, 1)
+    # 测试前向传播
+    input_tensor = torch.randn(1, 3, 320, 320)
+    cls_out, reg_out = model(input_tensor)
+    
+    print("\n--- SSDLite Model Test ---")
+    print(f"Input shape: {input_tensor.shape}")
+    print(f"Classification output shape: {cls_out.shape}")
+    print(f"Regression output shape: {reg_out.shape}")
+    
+    # 总预测框数
+    total_boxes = cls_out.shape[1]
+    print(f"Total predicted boxes per image: {total_boxes}")
 
-        self.cls_pred = nn.Conv2d(midc, num_anchors * num_classes, 1)
-        self.reg_pred = nn.Conv2d(midc, num_anchors * 4, 1)
+# %% [markdown]
+# 
+# ## 总结与后续步骤
+# 
+# 我们已经成功地使用 `timm` 的预训练 MobileNetV3 作为 Backbone，并结合 SSDLite 的设计思想，构建了一个完整的检测网络架构。
+# 
+# **需要注意，这只是网络的前向传播架构。一个完整的检测项目还需要包括：**
+# 
+# 1.  **锚点框生成 (Anchor/Default Box Generation)**：您需要根据每个特征图的尺寸，生成一系列不同大小和长宽比的默认框。
+# 2.  **损失函数 (Loss Function)**：实现 MultiBoxLoss，它包含分类损失（如交叉熵损失）和定位损失（如 Smooth L1 Loss）。
+# 3.  **目标匹配策略 (Target Matching)**：在训练时，需要将生成的默认框与真实的标注框（ground-truth boxes）进行匹配。
+# 4.  **数据增强 (Data Augmentation)**：对于检测任务至关重要，例如随机裁剪、翻转、颜色抖动等。
+# 5.  **后处理 (Post-processing)**：在推理时，需要对网络输出的大量预测框进行解码和非极大值抑制（NMS），以得到最终的检测结果。
+# 
+# 这个架构为您提供了一个坚实的起点，您可以基于它来完成后续的模块，构建一个完整的 SSDLite 目标检测项目。
 
-        # 初始化
-        for m in [self.cls_pred, self.reg_pred]:
-            nn.init.normal_(m.weight, mean=0.0, std=0.01)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0.0)
-
-    def forward(self, x):
-        B, _, H, W = x.shape
-        cls_feat = self.cls_conv(x)
-        reg_feat = self.reg_conv(x)
-
-        cls = self.cls_pred(cls_feat)  # [B, A*C, H, W]
-        reg = self.reg_pred(reg_feat)  # [B, A*4, H, W]
-
-        # 重排到 [B, H*W*A, C] & [B, H*W*A, 4]
-        cls = cls.permute(0, 2, 3, 1).contiguous().view(B, H * W * self.num_anchors, self.num_classes)
-        reg = reg.permute(0, 2, 3, 1).contiguous().view(B, H * W * self.num_anchors, 4)
-        return cls, reg
-
-
-
-class FPNLite(nn.Module):
-    """
-    输入: C3, C4, C5
-    输出: [P3, P4, P5]   (默认通道一致 outc, 尺度分别约为 1/8, 1/16, 1/32)
-    这里直接用 nn.Sequential 定义 1x1 与 3x3 block（Conv + BN + ReLU）。
-    """
-    def __init__(self, c3, c4, c5, outc=64):
-        super().__init__()
-        # 1x1 降维/对齐
-        self.l3 = nn.Sequential(
-            nn.Conv2d(c3, outc, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(outc),
-            nn.ReLU(inplace=True),
-        )
-        self.l4 = nn.Sequential(
-            nn.Conv2d(c4, outc, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(outc),
-            nn.ReLU(inplace=True),
-        )
-        self.l5 = nn.Sequential(
-            nn.Conv2d(c5, outc, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(outc),
-            nn.ReLU(inplace=True),
-        )
-
-        # 3x3 平滑
-        self.smooth3 = nn.Sequential(
-            nn.Conv2d(outc, outc, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(outc),
-            nn.ReLU(inplace=True),
-        )
-        self.smooth4 = nn.Sequential(
-            nn.Conv2d(outc, outc, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(outc),
-            nn.ReLU(inplace=True),
-        )
-        self.smooth5 = nn.Sequential(
-            nn.Conv2d(outc, outc, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(outc),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, c3, c4, c5):
-        p5 = self.l5(c5)
-        p4 = self.l4(c4) + F.interpolate(p5, size=c4.shape[-2:], mode="nearest")
-        p3 = self.l3(c3) + F.interpolate(p4, size=c3.shape[-2:], mode="nearest")
-
-        p5 = self.smooth5(p5)
-        p4 = self.smooth4(p4)
-        p3 = self.smooth3(p3)
-        return [p3, p4, p5]
 
