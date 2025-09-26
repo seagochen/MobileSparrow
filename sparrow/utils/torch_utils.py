@@ -111,7 +111,7 @@ def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors
     total_loss_cls = 0.0
     total_loss_reg = 0.0
 
-    pbar = tqdm(dataloader, desc="  [Validating]🟡 ")
+    pbar = tqdm(dataloader, desc="  🟡 [Validating] ")
     for imgs, targets, _ in pbar:
         imgs = imgs.to(device)
         targets_on_device = [t.to(device) for t in targets]
