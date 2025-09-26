@@ -36,9 +36,11 @@ def load_and_letterbox(image: Union[str, np.ndarray], dst: int = 320) -> Tuple[n
     if isinstance(image, str):
         img_bgr = cv2.imread(image)
         assert img_bgr is not None, f"Image not found: {image}"
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     else:
         img_bgr = image.copy()
+
+    # 转换为RGB
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
     # 获取图片的长宽
     h, w = img_rgb.shape[:2]
@@ -236,7 +238,7 @@ def draw_on_original(img_rgb: np.ndarray,
 # 总控：可视化单张图片
 # =============================
 @torch.no_grad()
-def visualize_predictions(
+def visualize_ssdlite(
     model,
     image: Union[np.ndarray, str],
     device,

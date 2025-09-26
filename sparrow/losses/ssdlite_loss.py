@@ -12,14 +12,8 @@
 # 
 # 在计算这两个损失之前，最关键的一步是**目标分配（Target Assignment）**，也就是为模型生成的成千上万个锚框（Anchor Boxes）中的每一个，分配一个真实的标签（是背景，还是某个物体？如果是物体，对应的真实框是哪一个？）。
 # 
-# 下面，我将为你分步实现一个完整的、适用于 `SSDLite_FPN` 的损失函数模块。
+# 下面，我们将创建一个 `SSDLoss` 类，其核心逻辑分为三步：
 # 
-# -----
-
-# %% [markdown]
-# ## 核心步骤
-# 
-# 我们将创建一个 `SSDLoss` 类，其核心逻辑分为三步：
 # 
 # 1.  **生成锚框 (Anchor Generation)**：为模型输出的每个尺寸的特征图（P3, P4, P5, P6, P7）预先生成一组固定的锚框。这一步在初始化时完成。
 # 2.  **目标分配 (Target Assignment)**：在每次训练迭代中，根据真实框（Ground Truth Boxes）和所有锚框的 IoU（交并比），为每个锚框分配匹配的真实物体或将其标记为背景。
@@ -30,7 +24,7 @@
 # -----
 
 # %% [markdown]
-# ### 第一步：安装依赖
+# ## 安装依赖
 # 
 # 我们需要 `torchvision` 来方便地计算 IoU 和损失。同时使用 `tqdm` 来显示训练进度和错误率。
 
@@ -39,7 +33,7 @@
 # !pip -q install tqdm
 
 # %% [markdown]
-# ### 第二步：锚框生成器 (Anchor Generator)
+# ## 锚框生成器 (Anchor Generator)
 # 
 # 我们需要一个辅助类来为不同尺寸的特征图生成锚框。
 
@@ -251,7 +245,7 @@ class AnchorGenerator:
 
 
 # %% [markdown]
-# ### 第三步：完整的损失函数类 `SSDLoss`
+# ## 完整的损失函数类 `SSDLoss`
 # 
 # 这个类将包含目标分配和损失计算的所有逻辑。
 
@@ -516,13 +510,14 @@ class SSDLoss(nn.Module):
         return loss_cls, loss_reg
 
 # %% [markdown]
-# ### 评估函数
+# ## 评估函数
 
 # %%
+import torch
 from tqdm import tqdm
 
 @torch.no_grad()
-def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors, device):
+def evaluate(model, dataloader, criterion, precomputed_anchors, device):
     """
     在验证集上评估模型，返回 (平均总损失, 平均分类损失, 平均回归损失)。
 
@@ -539,8 +534,6 @@ def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors
     criterion : nn.Module
         损失计算器（如你上面的 SSDLoss），调用方式：
         loss_cls, loss_reg = criterion(anchors, cls_preds, reg_preds, targets)
-    anchor_generator : AnchorGenerator
-        仅为接口统一，实际这里不直接用（由 criterion 使用）。
     precomputed_anchors : Tensor
         预先生成好的所有 anchors，形状 [A, 4]（与模型输出对齐）。
     device : str | torch.device
@@ -551,6 +544,7 @@ def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors
     - 内部会将 model 置为 eval 模式，并在函数结束后恢复 train 模式；
     - 计算的是简单的 batch 平均再对 dataloader 取平均（没有按样本数加权）。
     """
+    model_was_train = model.training
     model.eval()
 
     total_loss_cls = 0.0
@@ -558,8 +552,9 @@ def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors
 
     pbar = tqdm(dataloader, desc="  🟡 [Validating] ")
     for imgs, targets, _ in pbar:
-        imgs = imgs.to(device)
-        targets_on_device = [t.to(device) for t in targets]
+        # 将数据迁移至设备上
+        imgs = imgs.to(device, non_blocking=True)
+        targets_on_device = [t.to(device, non_blocking=True) for t in targets]
 
         # 前向：要求模型返回 (cls_preds, reg_preds)
         cls_preds, reg_preds = model(imgs)
@@ -576,5 +571,9 @@ def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors
     avg_reg_loss = total_loss_reg / len(dataloader)
     avg_total_loss = avg_cls_loss + avg_reg_loss
 
-    model.train()  # 恢复训练模式
+    if model_was_train:
+        model.train()  # 恢复训练模式
     return avg_total_loss, avg_cls_loss, avg_reg_loss
+
+
+
