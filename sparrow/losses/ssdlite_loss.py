@@ -519,6 +519,8 @@ class SSDLoss(nn.Module):
 # ### 评估函数
 
 # %%
+from tqdm import tqdm
+
 @torch.no_grad()
 def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors, device):
     """
@@ -576,6 +578,3 @@ def evaluate(model, dataloader, criterion, anchor_generator, precomputed_anchors
 
     model.train()  # 恢复训练模式
     return avg_total_loss, avg_cls_loss, avg_reg_loss
-
-
-
