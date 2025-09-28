@@ -102,24 +102,44 @@ class MoveNetLoss(nn.Module):
         self.focal_loss = FocalLoss(alpha=focal_loss_alpha, gamma=focal_loss_gamma)
         self.l1_loss = nn.L1Loss(reduction='sum')  # 先求和，再手动除以 mask 数量
 
+class MoveNetLoss(nn.Module):
+    def __init__(self,
+                 focal_loss_alpha: float = 0.25,
+                 focal_loss_gamma: float = 2.0,
+                 hm_weight: float = 1.0,
+                 ct_weight: float = 1.0,
+                 reg_weight: float = 2.0,
+                 off_weight: float = 1.0):
+        super().__init__()
+        self.hm_weight = hm_weight
+        self.ct_weight = ct_weight
+        self.reg_weight = reg_weight
+        self.off_weight = off_weight
+        
+        self.focal_loss = FocalLoss(alpha=focal_loss_alpha, gamma=focal_loss_gamma)
+        self.l1_loss = nn.L1Loss(reduction='sum') # 先求和，再手动除以mask的数量
+
     def forward(self,
                 preds: Dict[str, torch.Tensor],
                 labels: torch.Tensor,
                 kps_masks: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-
-        # 1) 取出 GT
+        """
+        计算 MoveNet 的总损失。
+        """
+        # 1. 从标签张量中切分出各个真值 (Ground Truth)
         gt_heatmaps = labels[:, :17, :, :]
         gt_centers  = labels[:, 17:18, :, :]
         gt_regs     = labels[:, 18:52, :, :]
         gt_offsets  = labels[:, 52:, :, :]
+        
         B, K, H, W = gt_heatmaps.shape
         device = labels.device
 
-        # 2) 热图/中心损失
+        # 2. 计算热力图损失 (L_hm) 和中心点损失 (L_ct)
         loss_hm = self.focal_loss(preds['heatmaps'], gt_heatmaps)
         loss_ct = self.focal_loss(preds['centers'],  gt_centers)
 
-        # 3) 回归（中心单峰监督）
+        # 3. 计算回归损失 (L_reg) —— 只在“中心单峰”监督
         with torch.no_grad():
             flat_centers = gt_centers.view(B, -1)
             idx = flat_centers.argmax(dim=1)
@@ -127,18 +147,14 @@ class MoveNetLoss(nn.Module):
             cx = idx % W
             center_1hot = torch.zeros_like(gt_centers)
             center_1hot[torch.arange(B), 0, cy, cx] = 1.0
-
+        
         center_mask_2k = center_1hot.repeat(1, 2*K, 1, 1)
         pred_regs = preds['regs'] * center_mask_2k
         gt_regs_m = gt_regs * center_mask_2k
         denom_reg = center_mask_2k.sum().clamp(min=1.0)
         loss_reg = self.l1_loss(pred_regs, gt_regs_m) / denom_reg
 
-        # >>> 新增：回归 MAE（按掩码平均）
-        reg_abs = (preds['regs'] - gt_regs).abs()
-        reg_mae = (reg_abs * center_mask_2k).sum() / denom_reg
-
-        # 4) 偏移（逐关键点单峰监督）
+        # 4. 计算偏移损失 (L_off) —— 每个关键点仅在“自身单峰”监督
         with torch.no_grad():
             flat_kpt_hms = gt_heatmaps.view(B, K, -1)
             idx = flat_kpt_hms.argmax(dim=-1)
@@ -146,42 +162,31 @@ class MoveNetLoss(nn.Module):
             kx = idx % W
             kpt_peak_2k = torch.zeros(B, 2*K, H, W, device=device)
             for j in range(K):
-                b_idx = torch.arange(B, device=device)
-                kpt_peak_2k[b_idx, 2*j,   ky[:, j], kx[:, j]] = 1.0
-                kpt_peak_2k[b_idx, 2*j+1, ky[:, j], kx[:, j]] = 1.0
+                kpt_peak_2k[torch.arange(B), 2*j,   ky[:, j], kx[:, j]] = 1.0
+                kpt_peak_2k[torch.arange(B), 2*j+1, ky[:, j], kx[:, j]] = 1.0
 
         vis_2k = (kps_masks.view(B, K, 1, 1)
                         .repeat(1, 1, 2, H, W)
                         .view(B, 2*K, H, W))
+        
         off_mask = kpt_peak_2k * vis_2k
-
         pred_offsets = preds['offsets'] * off_mask
         gt_offsets_m = gt_offsets * off_mask
         denom_off = off_mask.sum().clamp(min=1.0)
         loss_off = self.l1_loss(pred_offsets, gt_offsets_m) / denom_off
-
-        # >>> 新增：偏移 MAE（按掩码平均）
-        off_abs = (preds['offsets'] - gt_offsets).abs()
-        off_mae = (off_abs * off_mask).sum() / denom_off
-
-        # 5) 总损失
+        
+        # 5. 总损失
         total_loss = (self.hm_weight * loss_hm +
-                      self.ct_weight * loss_ct +
-                      self.reg_weight * loss_reg +
-                      self.off_weight * loss_off)
+                    self.ct_weight * loss_ct +
+                    self.reg_weight * loss_reg +
+                    self.off_weight * loss_off)
 
-        # 返回标量与监控项（都 detach 成 Python float，方便 tqdm 打印）
         loss_dict = {
             "total_loss":   float(total_loss.detach().item()),
             "loss_heatmap": float(loss_hm.detach().item()),
             "loss_center":  float(loss_ct.detach().item()),
             "loss_regs":    float(loss_reg.detach().item()),
             "loss_offsets": float(loss_off.detach().item()),
-            # >>> 新增：MAE 与监督点数
-            "reg_mae":      float(reg_mae.detach().item()),
-            "off_mae":      float(off_mae.detach().item()),
-            "n_reg":        float(denom_reg.detach().item()),
-            "n_off":        float(denom_off.detach().item()),
         }
         return total_loss, loss_dict
 
