@@ -93,11 +93,12 @@ class MoveNetHead(nn.Module):
 
         self.hm = nn.Conv2d(midc, num_joints, 1)
         self.ct = nn.Conv2d(midc, 1, 1)
-        self.reg = nn.Conv2d(midc, 2, 1)
+        self.reg = nn.Conv2d(midc, num_joints * 2, 1)
         self.off = nn.Conv2d(midc, num_joints * 2, 1)
 
         # 让 heatmap 初始较低，利于稳定训练（可选）
         nn.init.constant_(self.hm.bias, -2.0)
+        nn.init.constant_(self.ct.bias, -2.0) 
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         return {
@@ -275,8 +276,10 @@ def model_runnable_test():
 # 相对于 `SSDLite` 来说，MoveNet模型的输出不能直观的生成我们所需要的 `bbox` + `confidence` + `keypoints` 的结构，但是我们可以通过输出把模型的输出结果拼接成我们想要的内容。
 
 # %%
+import numpy as np
 import torch
 import torch.nn.functional as F
+
 
 @torch.no_grad()
 def decode_movenet_outputs(
@@ -287,14 +290,15 @@ def decode_movenet_outputs(
     center_thresh: float = 0.2,
     keypoint_thresh: float = 0.05,
     use_mean_kp_in_presence: bool = True,
-    regs_in_pixels: bool = True,   # 如果你的 regs 是特征图单位，设为 False
+    regs_in_pixels: bool = False,   # ← 按常见做法：regs 多为“特征图格”为单位，因此默认 False
+    refine_with_offsets: bool = True
 ):
     """
-    outputs: 来自模型的字典：
-      - heatmaps: [1, K, H, W]
-      - centers:  [1, 1, H, W]
-      - regs:     [1, 2, H, W]   -> (w, h)
-      - offsets:  [1, 2K, H, W]  -> (dx, dy) per keypoint
+    标准 2K regs 版本：
+      - heatmaps: [1, K,  H, W]  (logits)
+      - centers : [1, 1,  H, W]  (logits)
+      - regs    : [1, 2K, H, W]  (中心->关键点位移, 单位=格 或 像素)
+      - offsets : [1, 2K, H, W]  (关键点亚像素偏移，在就近网格上取)
     返回：list[dict]，每个实例：
       {
         "bbox": [x1,y1,x2,y2],
@@ -303,114 +307,103 @@ def decode_movenet_outputs(
       }
     """
     H_img, W_img = img_size
-    hm = outputs["heatmaps"][0]           # [K,H,W]
-    ct = outputs["centers"][0, 0]         # [H,W]
-    rg = outputs["regs"][0]               # [2,H,W]
-    off = outputs["offsets"][0]           # [2K,H,W]
+    hm  = outputs["heatmaps"][0]   # [K,H,W]
+    ct  = outputs["centers"][0,0]  # [H,W]
+    rg  = outputs["regs"][0]       # [2K,H,W]  ← 关键：2K
+    off = outputs["offsets"][0]    # [2K,H,W]
 
     K, H, W = hm.shape
-    device = hm.device
 
-    # 1) centers: topk + 阈值
-    ct_prob = torch.sigmoid(ct)           # [H,W]
-    ct_flat = ct_prob.flatten()           # [H*W]
+    # 1) 取中心点候选
+    ct_prob = torch.sigmoid(ct)                   # [H,W]
+    ct_flat = ct_prob.flatten()                   # [H*W]
     scores, inds = torch.topk(ct_flat, k=min(topk_centers, ct_flat.numel()))
     keep = scores > center_thresh
-    scores = scores[keep]
-    inds = inds[keep]
-    v_c = (inds // W).long()
-    u_c = (inds %  W).long()
+    scores = scores[keep]; inds = inds[keep]
+    v_c = (inds // W).long(); u_c = (inds % W).long()
 
-    detections = []
+    dets = []
     if scores.numel() == 0:
-        return detections
+        return dets
 
-    # 2) 对每个中心生成 bbox + 关键点
+    hm_prob = torch.sigmoid(hm)                   # [K,H,W]
+
     for sc, uc, vc in zip(scores.tolist(), u_c.tolist(), v_c.tolist()):
-        # 2.1 bbox 宽高 (w,h)
-        w = rg[0, vc, uc].item()
-        h = rg[1, vc, uc].item()
-        # 保证正值
-        w = max(1.0, float(w))
-        h = max(1.0, float(h))
-        if not regs_in_pixels:
-            w *= stride
-            h *= stride
-
-        # 中心坐标（像素）
+        # 中心像素坐标
         cx = (uc + 0.5) * stride
         cy = (vc + 0.5) * stride
 
-        x1 = max(0.0, cx - w / 2)
-        y1 = max(0.0, cy - h / 2)
-        x2 = min(float(W_img - 1), cx + w / 2)
-        y2 = min(float(H_img - 1), cy + h / 2)
-
-        # 2.2 在 bbox 范围的特征图窗口里找关键点峰值
-        # 把 bbox 映射到特征图坐标系
-        fx1 = max(0, int(x1 // stride))
-        fy1 = max(0, int(y1 // stride))
-        fx2 = min(W - 1, int(x2 // stride))
-        fy2 = min(H - 1, int(y2 // stride))
-
         kp_list = []
         kp_scores = []
-        hm_prob = torch.sigmoid(hm)  # [K,H,W] 只算一次
 
         for k in range(K):
-            # 裁窗口
-            window = hm_prob[k, fy1:fy2+1, fx1:fx2+1]
-            if window.numel() == 0:
-                kp_list.append((float('nan'), float('nan'), 0.0))
-                kp_scores.append(0.0)
-                continue
+            # 2) 在中心格读取该关键点的位移 (dx,dy)
+            dx = rg[2*k + 0, vc, uc].item()
+            dy = rg[2*k + 1, vc, uc].item()
+            if not regs_in_pixels:
+                dx *= stride
+                dy *= stride
 
-            # 找峰值（窗口内）
-            flat_idx = torch.argmax(window)
-            wy = int(flat_idx // (fx2 - fx1 + 1))
-            wx = int(flat_idx %  (fx2 - fx1 + 1))
-            u_k = fx1 + wx
-            v_k = fy1 + wy
+            x_k = cx + dx
+            y_k = cy + dy
 
-            s_k = hm_prob[k, v_k, u_k].item()
+            # 3) 可选：用 offsets 做亚像素微调（在就近网格取值）
+            uk = int(round(x_k / stride))
+            vk = int(round(y_k / stride))
+            uk = max(0, min(W - 1, uk))
+            vk = max(0, min(H - 1, vk))
+
+            if refine_with_offsets:
+                ox = off[2*k + 0, vk, uk].item()
+                oy = off[2*k + 1, vk, uk].item()
+                x_k = (uk + ox) * stride
+                y_k = (vk + oy) * stride
+
+            # 4) 关键点置信度：用热图在(uk,vk)处的概率
+            s_k = hm_prob[k, vk, uk].item()
+
+            # 限制到图像范围
+            x_k = float(max(0.0, min(W_img - 1.0, x_k)))
+            y_k = float(max(0.0, min(H_img - 1.0, y_k)))
+
             if s_k < keypoint_thresh:
                 kp_list.append((float('nan'), float('nan'), 0.0))
                 kp_scores.append(0.0)
-                continue
+            else:
+                kp_list.append((x_k, y_k, s_k))
+                kp_scores.append(s_k)
 
-            # 读 offsets
-            dx = off[2*k + 0, v_k, u_k].item()
-            dy = off[2*k + 1, v_k, u_k].item()
-            # 你若训练在 [-0.5,0.5]，也可 clamp 一下
-            # dx = max(-0.5, min(0.5, dx))
-            # dy = max(-0.5, min(0.5, dy))
+        # 5) 由关键点集合得到 bbox（min/max + padding）
+        xs = [x for (x,y,c) in kp_list if c > 0.0 and not (np.isnan(x) or np.isnan(y))]
+        ys = [y for (x,y,c) in kp_list if c > 0.0 and not (np.isnan(x) or np.isnan(y))]
+        if len(xs) >= 2 and len(ys) >= 2:
+            x1, x2 = max(0.0, min(xs)), min(W_img - 1.0, max(xs))
+            y1, y2 = max(0.0, min(ys)), min(H_img - 1.0, max(ys))
+            # 轻微扩张
+            pad = 0.05
+            w = x2 - x1; h = y2 - y1
+            x1 = max(0.0, x1 - pad * w); y1 = max(0.0, y1 - pad * h)
+            x2 = min(W_img - 1.0, x2 + pad * w); y2 = min(H_img - 1.0, y2 + pad * h)
+        else:
+            # 回退：以中心点为方框
+            x1 = max(0.0, cx - 32); y1 = max(0.0, cy - 32)
+            x2 = min(W_img - 1.0, cx + 32); y2 = min(H_img - 1.0, cy + 32)
 
-            x_k = (u_k + dx) * stride
-            y_k = (v_k + dy) * stride
-
-            # 限制到图像内
-            x_k = float(max(0.0, min(W_img - 1, x_k)))
-            y_k = float(max(0.0, min(H_img - 1, y_k)))
-
-            kp_list.append((x_k, y_k, float(s_k)))
-            kp_scores.append(float(s_k))
-
-        # 2.3 人物置信度
+        # 6) 人体置信度
         if use_mean_kp_in_presence and len(kp_scores) > 0:
-            person_score = float(sc) * (sum(kp_scores)/max(1, len(kp_scores)))
+            person_score = float(sc) * (sum(kp_scores) / max(1, len(kp_scores)))
         else:
             person_score = float(sc)
 
-        det = {
+        dets.append({
             "bbox": [float(x1), float(y1), float(x2), float(y2)],
-            "person_score": person_score,
-            "keypoints": kp_list  # [(x,y,conf)*K]
-        }
-        detections.append(det)
+            "person_score": float(person_score),
+            "keypoints": kp_list
+        })
 
-    # 3) 可选：按 person_score 做一次 bbox NMS（多中心接近时有用）
-    detections = nms_by_iou(detections, iou_thr=0.5)
-    return detections
+    # 7) NMS（可选）
+    dets = nms_by_iou(dets, iou_thr=0.5)
+    return dets
 
 
 def nms_by_iou(dets, iou_thr=0.5):
@@ -434,6 +427,39 @@ def nms_by_iou(dets, iou_thr=0.5):
             if not taken[j] and j!=i and iou(dets[i], dets[j])>iou_thr:
                 taken[j]=True
     return keep
+
+# %% [markdown]
+# ## 完整测试
+
+# %%
+if __name__ == "__main__":
+
+    # 1. 实例化 Backbone，注意修改 out_indices 来获取 C3, C4, C5
+    backbone_mbv3 = timm.create_model(
+        'mobilenetv3_large_100',
+        pretrained=True,
+        features_only=True,
+        out_indices=(2, 3, 4), # <-- 核心改动：获取 stride=8, 16, 32 的特征
+    )
+
+    print("Backbone for FPN created. Output channels:", backbone_mbv3.feature_info.channels())
+    
+    # 2. 实例化 MoveNet_FPN
+    model = MoveNet_FPN(backbone_mbv3, fpn_out_channels=128, num_joints=17, upsample_to_quarter=False)
+    model.eval()
+
+    # 测试前向传播
+    input_tensor = torch.randn(1, 3, 192, 192)  # MoveNet 常用小尺寸
+    preds = model(input_tensor)
+
+    # 打印预测结果
+    print({k: v.shape for k, v in y.items()})
+
+    # 对模型的输出进行解码
+    H_img, W_img = 192, 192
+    dets = decode_movenet_outputs(preds, img_size=(H_img, W_img), stride=8)
+
+    print(f"Results length: {len(dets)}, the keys of results: {dets[0].keys()}")
 
 # %% [markdown]
 # ## 完整测试

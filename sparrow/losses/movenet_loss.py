@@ -123,53 +123,54 @@ class MoveNetLoss(nn.Module):
         
         B, K, H, W = gt_heatmaps.shape
         device = labels.device
-        
+
         # 2. 计算热力图损失 (L_hm) 和中心点损失 (L_ct)
         loss_hm = self.focal_loss(preds['heatmaps'], gt_heatmaps)
-        loss_ct = self.focal_loss(preds['centers'], gt_centers)
-        
-        # 3. 计算回归损失 (L_reg)
-        # 只在中心点位置计算回归损失
-        # 创建一个掩码，只保留中心点所在位置为1
-        center_mask = (gt_centers.max(dim=1, keepdim=True)[0] > 0.99).float() # [B, 1, H, W]
-        center_mask = center_mask.expand(-1, 2 * K, -1, -1) # 扩展到与 regs 相同的通道数
-        
-        pred_regs = preds['regs'] * center_mask
-        gt_regs = gt_regs * center_mask
-        
-        num_centers = center_mask.sum()
-        loss_reg = self.l1_loss(pred_regs, gt_regs) / (num_centers + 1e-8)
-        
-        # 4. 计算偏移损失 (L_off)
-        # 只在关键点位置计算偏移损失
-        # 创建一个掩码，只保留关键点所在位置为1
-        kpt_mask_spatial = (gt_heatmaps.max(dim=1, keepdim=True)[0] > 0.99).float() # [B, 1, H, W]
-        kpt_mask_spatial = kpt_mask_spatial.expand(-1, 2 * K, -1, -1) # 扩展到与 offsets 相同的通道数
-        
-        # 结合 kps_masks (可见性)
-        kps_masks_expanded = kps_masks.view(B, K, 1, 1).expand(-1, -1, 2, -1).reshape(B, 2*K, 1, 1) # [B, 34, 1, 1]
-        final_off_mask = kpt_mask_spatial * kps_masks_expanded
-        
-        pred_offsets = preds['offsets'] * final_off_mask
-        gt_offsets = gt_offsets * final_off_mask
+        loss_ct = self.focal_loss(preds['centers'],  gt_centers)
 
-        num_kpts_offsets = final_off_mask.sum()
-        loss_off = self.l1_loss(pred_offsets, gt_offsets) / (num_kpts_offsets + 1e-8)
+        # 3. 计算回归损失 (L_reg) —— 只在“中心峰值/近邻”监督 2K 通道
+        # 如果你在 dataloader 里把 center 高斯抹开了 3×3，建议把阈值放宽些（例如 0.5）
+        center_mask = (gt_centers > 0.5).float()                     # [B,1,H,W]
+        center_mask_2k = center_mask.repeat(1, 2*K, 1, 1)            # [B,2K,H,W]
+
+        pred_regs = preds['regs'] * center_mask_2k
+        gt_regs_m = gt_regs        * center_mask_2k
+        denom_reg = center_mask_2k.sum().clamp(min=1.0)
+        loss_reg = self.l1_loss(pred_regs, gt_regs_m) / denom_reg
+
+        # 4. 计算偏移损失 (L_off) —— 每个关键点仅在自己的峰值位置监督对应 2 通道
+        # 若你把 offsets 标签也抹开 3×3，这里可把 0.99 放宽到 0.5
+        kpt_peak = (gt_heatmaps > 0.99).float()                      # [B,K,H,W]
+        # [B,K,1,H,W] -> 重复到 [B,K,2,H,W] -> reshape 到 [B,2K,H,W]
+        kpt_peak_2k = (kpt_peak.unsqueeze(2).repeat(1,1,2,1,1)
+                                .view(B, 2*K, H, W))                # [B,2K,H,W]
+
+        # 可见性 -> [B,K,1,1] -> [B,K,2,H,W] -> [B,2K,H,W]
+        vis_2k = (kps_masks.view(B, K, 1, 1)
+                        .repeat(1, 1, 2, H, W)
+                        .view(B, 2*K, H, W))                      # [B,2K,H,W]
+
+        off_mask = kpt_peak_2k * vis_2k                              # [B,2K,H,W]
+
+        pred_offsets = preds['offsets'] * off_mask
+        gt_offsets_m = gt_offsets        * off_mask
+        denom_off = off_mask.sum().clamp(min=1.0)
+        loss_off = self.l1_loss(pred_offsets, gt_offsets_m) / denom_off
         
-        # 5. 计算总损失
-        total_loss = (self.hm_weight * loss_hm + 
-                      self.ct_weight * loss_ct + 
-                      self.reg_weight * loss_reg + 
-                      self.off_weight * loss_off)
-        
+        # 5. 总损失
+        total_loss = (self.hm_weight * loss_hm +
+                    self.ct_weight * loss_ct +
+                    self.reg_weight * loss_reg +
+                    self.off_weight * loss_off)
+
+        # ✅ 用 float 记录，训练循环里更稳（+=、打印都方便）
         loss_dict = {
-            "total_loss": total_loss,
-            "loss_heatmap": loss_hm,
-            "loss_center": loss_ct,
-            "loss_regs": loss_reg,
-            "loss_offsets": loss_off,
+            "total_loss":   float(total_loss.detach().item()),
+            "loss_heatmap": float(loss_hm.detach().item()),
+            "loss_center":  float(loss_ct.detach().item()),
+            "loss_regs":    float(loss_reg.detach().item()),
+            "loss_offsets": float(loss_off.detach().item()),
         }
-        
         return total_loss, loss_dict
 
 # %% [markdown]

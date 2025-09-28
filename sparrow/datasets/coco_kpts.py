@@ -200,43 +200,66 @@ class CocoKeypointsDataset(Dataset):
             raise FileNotFoundError(f"No valid items found under: {self.img_root} with {self.ann_path}")
         return items
 
-    def _encode_targets(self, kps_xyv: np.ndarray, center_xy: Tuple[float, float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        # 这个函数逻辑不变，直接从原文件复制即可
+    def _encode_targets(self, kps_xyv: np.ndarray, center_xy: Tuple[float, float]):
         J = 17
-        heatmaps = np.zeros((J, self.Hf, self.Wf), dtype=np.float32)
-        centers = np.zeros((1, self.Hf, self.Wf), dtype=np.float32)
-        regs = np.zeros((2 * J, self.Hf, self.Wf), dtype=np.float32)
-        offsets = np.zeros((2 * J, self.Hf, self.Wf), dtype=np.float32)
+        Hf, Wf, s = self.Hf, self.Wf, self.stride
+
+        heatmaps = np.zeros((J, Hf, Wf), dtype=np.float32)
+        centers  = np.zeros((1, Hf, Wf), dtype=np.float32)
+        regs     = np.zeros((2 * J, Hf, Wf), dtype=np.float32)
+        offsets  = np.zeros((2 * J, Hf, Wf), dtype=np.float32)
         kps_mask = np.zeros((J,), dtype=np.float32)
+
+        # 关键点转到特征图坐标
         kps_f = kps_xyv.copy()
-        kps_f[:, :2] /= self.stride
+        kps_f[:, :2] /= s
         vis = (kps_f[:, 2] > 0)
+
+        # ---- 高斯半径（和你现有 draw_gaussian 逻辑一致即可）----
         if np.any(vis):
             xs, ys = kps_f[vis, 0], kps_f[vis, 1]
-            w_box, h_box = float(xs.max() - xs.min()), float(ys.max() - ys.min())
-            side = max(1.0, max(w_box, h_box))
+            side = max(1.0, float(xs.max() - xs.min()), float(ys.max() - ys.min()))
         else:
-            side = float(max(self.Wf, self.Hf)) / 4.0
+            side = float(max(Wf, Hf)) / 4.0
         r_kpt = max(1, int(round(0.025 * side)))
         r_ctr = max(2, int(round(0.035 * side)))
+
+        # ---- 写关键点热图 ----
         for j in range(J):
             if kps_f[j, 2] > 0:
-                xj, yj = kps_f[j, 0].item(), kps_f[j, 1].item()
-                if 0 <= xj < self.Wf and 0 <= yj < self.Hf:
+                xj, yj = float(kps_f[j, 0]), float(kps_f[j, 1])
+                if 0 <= xj < Wf and 0 <= yj < Hf:
                     draw_gaussian(heatmaps[j], (int(round(xj)), int(round(yj))), r_kpt)
                     kps_mask[j] = 1.0
-        cx, cy = center_xy[0] / self.stride, center_xy[1] / self.stride
-        if 0 <= cx < self.Wf and 0 <= cy < self.Hf:
+
+        # ---- 写中心热图 ----
+        cx, cy = center_xy[0] / s, center_xy[1] / s
+        if 0 <= cx < Wf and 0 <= cy < Hf:
             draw_gaussian(centers[0], (int(round(cx)), int(round(cy))), r_ctr)
-        cx_i, cy_i = int(np.clip(np.floor(cx + 0.5), 0, self.Wf - 1)), int(np.clip(np.floor(cy + 0.5), 0, self.Hf - 1))
+
+        # ========= 关键修改：密集监督窗口 =========
+        reg_radius = 1  # 3x3；可按分辨率/人框大小自适应
+        cx_i, cy_i = int(round(cx)), int(round(cy))
+        y0, y1 = max(0, cy_i - reg_radius), min(Hf, cy_i + reg_radius + 1)
+        x0, x1 = max(0, cx_i - reg_radius), min(Wf, cx_i + reg_radius + 1)
+
+        # regs：从中心到每个关键点的位移（特征图单位）
         for j in range(J):
             if kps_mask[j] > 0:
-                regs[2*j:2*j+2, cy_i, cx_i] = kps_f[j, :2] - np.array([cx, cy])
+                reg_vec = kps_f[j, :2] - np.array([cx, cy], dtype=np.float32)
+                regs[2*j:2*j+2, y0:y1, x0:x1] = reg_vec[:, None, None]
+
+        # offsets：每个关键点在其所在网格内的亚像素偏移
         for j in range(J):
             if kps_mask[j] > 0:
-                xj, yj = kps_f[j, :2]
-                gx, gy = int(np.clip(np.floor(xj+0.5),0,self.Wf-1)), int(np.clip(np.floor(yj+0.5),0,self.Hf-1))
-                offsets[2*j:2*j+2, gy, gx] = np.array([xj-gx, yj-gy])
+                xj, yj = float(kps_f[j, 0]), float(kps_f[j, 1])
+                gx, gy = int(round(xj)), int(round(yj))
+                if 0 <= gx < Wf and 0 <= gy < Hf:
+                    off_vec = np.array([xj - gx, yj - gy], dtype=np.float32)
+                    oy0, oy1 = max(0, gy - reg_radius), min(Hf, gy + reg_radius + 1)
+                    ox0, ox1 = max(0, gx - reg_radius), min(Wf, gx + reg_radius + 1)
+                    offsets[2*j:2*j+2, oy0:oy1, ox0:ox1] = off_vec[:, None, None]
+
         return heatmaps, centers, regs, offsets, kps_mask
 
     def __len__(self):
