@@ -402,8 +402,42 @@ def decode_movenet_outputs(
         })
 
     # 7) NMS（可选）
+    # 先按中心距离做一次抑制（阈值可按 stride * 3 左右调）
+    dets = suppress_by_center_distance(dets, min_dist= stride * 3)
+
+    # 再做 IoU NMS
     dets = nms_by_iou(dets, iou_thr=0.5)
     return dets
+
+
+def suppress_by_center_distance(dets, min_dist: float = 24.0):
+    # dets: [{"bbox":[x1,y1,x2,y2], "person_score":..., "keypoints":[(x,y,conf)*K]}]
+    if len(dets) <= 1:
+        return dets
+    # 取中心点（由关键点均值；若关键点缺失则退回到 bbox 中心）
+    def center_of(det):
+        xs = [x for (x,y,c) in det["keypoints"] if c > 0 and not (np.isnan(x) or np.isnan(y))]
+        ys = [y for (x,y,c) in det["keypoints"] if c > 0 and not (np.isnan(x) or np.isnan(y))]
+        if len(xs) >= 2 and len(ys) >= 2:
+            cx = float(sum(xs)/len(xs)); cy = float(sum(ys)/len(ys))
+        else:
+            x1,y1,x2,y2 = det["bbox"]; cx = 0.5*(x1+x2); cy = 0.5*(y1+y2)
+        return cx, cy
+
+    order = sorted(range(len(dets)), key=lambda i: dets[i]["person_score"], reverse=True)
+    keep, taken = [], [False]*len(dets)
+    centers = [center_of(d) for d in dets]
+
+    for i in order:
+        if taken[i]: continue
+        keep.append(dets[i])
+        ci = centers[i]
+        for j in order:
+            if taken[j] or j == i: continue
+            cj = centers[j]
+            if ((ci[0]-cj[0])**2 + (ci[1]-cj[1])**2)**0.5 < min_dist:
+                taken[j] = True
+    return keep
 
 
 def nms_by_iou(dets, iou_thr=0.5):
