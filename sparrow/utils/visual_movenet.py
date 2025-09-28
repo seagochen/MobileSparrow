@@ -41,14 +41,15 @@ def load_and_letterbox(image: Union[str, np.ndarray], dst: int = 192) -> Tuple[n
         assert img_bgr is not None, f"Image not found: {image}"
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     else:
-        arr = np.asarray(image)
-        if arr.ndim == 2:
-            arr = np.stack([arr]*3, axis=-1)
-        elif arr.shape[2] == 4:
-            arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
+        # --- 关键修改：确保传入的 numpy 数组是 RGB 格式 ---
+        img_arr = np.asarray(image)
+        if img_arr.ndim == 3 and img_arr.shape[2] == 3:
+            # 假设3通道 uint8 数组是 BGR，转换为 RGB
+            img_rgb = cv2.cvtColor(img_arr, cv2.COLOR_BGR2RGB)
+        elif img_arr.ndim == 2: # 灰度图
+            img_rgb = cv2.cvtColor(img_arr, cv2.COLOR_GRAY2RGB)
         else:
-            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB) if arr.dtype != np.uint8 else arr[..., ::-1] if False else arr
-        img_rgb = arr
+            img_rgb = img_arr # 其他情况（如已是RGB）直接使用
 
     h, w = img_rgb.shape[:2]
     scale = dst / max(h, w)
@@ -89,26 +90,61 @@ def _circle(ax, x, y, r=3, color="cyan", lw=1.5):
 def _line(ax, x1, y1, x2, y2, color="yellow", lw=2):
     ax.plot([x1, x2], [y1, y2], color=color, linewidth=lw)
 
+# --- 新增：Heatmap 绘制辅助函数 ---
+def _draw_heatmaps(
+    base_img_rgb: np.ndarray,
+    pred_heatmaps: torch.Tensor,
+    pred_centers: torch.Tensor,
+    alpha: float = 0.6
+) -> Tuple[np.ndarray, np.ndarray]:
+    """将预测的热力图叠加到基础图像上"""
+    H, W = base_img_rgb.shape[:2]
+
+    # 1. 关键点热力图 (取所有通道最大值融合成一张)
+    kpt_hm_prob = torch.sigmoid(pred_heatmaps[0])
+    kpt_hm_composite = kpt_hm_prob.max(dim=0)[0].cpu().numpy()
+    kpt_hm_resized = cv2.resize(kpt_hm_composite, (W, H), interpolation=cv2.INTER_LINEAR)
+    kpt_hm_norm = (255 * (kpt_hm_resized - kpt_hm_resized.min()) / (kpt_hm_resized.max() - kpt_hm_resized.min() + 1e-6)).astype(np.uint8)
+    kpt_heatmap_color = cv2.applyColorMap(kpt_hm_norm, cv2.COLORMAP_JET)
+
+    # 2. 中心点热力图
+    center_hm_prob = torch.sigmoid(pred_centers[0, 0]).cpu().numpy()
+    center_hm_resized = cv2.resize(center_hm_prob, (W, H), interpolation=cv2.INTER_LINEAR)
+    center_hm_norm = (255 * (center_hm_resized - center_hm_resized.min()) / (center_hm_resized.max() - center_hm_resized.min() + 1e-6)).astype(np.uint8)
+    center_heatmap_color = cv2.applyColorMap(center_hm_norm, cv2.COLORMAP_JET)
+
+    # 3. 图像融合
+    base_img_bgr = cv2.cvtColor(base_img_rgb, cv2.COLOR_RGB2BGR)
+    
+    overlay_kpt = cv2.addWeighted(base_img_bgr, 1 - alpha, kpt_heatmap_color, alpha, 0)
+    overlay_center = cv2.addWeighted(base_img_bgr, 1 - alpha, center_heatmap_color, alpha, 0)
+
+    # 转回 RGB 供 matplotlib 显示
+    return cv2.cvtColor(overlay_kpt, cv2.COLOR_BGR2RGB), cv2.cvtColor(overlay_center, cv2.COLOR_BGR2RGB)
+
+
 # ---------- 主流程：可视化（单张） ----------
 @torch.no_grad()
 def visualize_movenet(
     model,
     image: Union[np.ndarray, str],
     device,
-    decoder,                     # 传入 decode_movenet_outputs
-    input_size: int = 192,       # 模型输入
-    stride: int = 8,             # 输出步幅（P3=8；如果你上采样到1/4，请改为4）
+    decoder,                      # 传入 decode_movenet_outputs
+    input_size: int = 192,        # 模型输入
+    stride: int = 8,              # 输出步幅
     topk_centers: int = 5,
     center_thresh: float = 0.2,
     keypoint_thresh: float = 0.05,
     draw_bbox: bool = True,
     draw_skeleton: bool = True,
-    draw_on_orig: bool = True,   # 在原图上画；否则在 letterboxed 图上画
+    draw_on_orig: bool = True,
+    draw_heatmaps: bool = False, # --- 新增参数 ---
+    heatmap_alpha: float = 0.6,  # --- 新增参数 ---
     save_path: str | None = None,
     show: bool = False,
 ):
     """
-    根据 MoveNet 输出，绘制 bbox + person_score + 关键点 + 骨架。
+    根据 MoveNet 输出，绘制 bbox + person_score + 关键点 + 骨架，并可选绘制热力图。
     """
     # 1) 读图 + letterbox
     img_rgb, input_img, H, W, scale, pad_h, pad_w = load_and_letterbox(image, dst=input_size)
@@ -118,7 +154,7 @@ def visualize_movenet(
     model.eval()
     preds = model(img_tensor)  # dict: heatmaps/centers/regs/offsets
 
-    # 3) 解码（注意：img_size 传 letterbox 后的输入大小）
+    # 3) 解码
     dets = decoder(
         preds,
         img_size=(input_size, input_size),
@@ -126,61 +162,73 @@ def visualize_movenet(
         topk_centers=topk_centers,
         center_thresh=center_thresh,
         keypoint_thresh=keypoint_thresh,
-        regs_in_pixels=True
+        # regs_in_pixels=True # 根据你的模型定义调整
     )
+    
+    # 4) 准备绘图
+    display_img = img_rgb if draw_on_orig else input_img
+    display_W, display_H = (W, H) if draw_on_orig else (input_size, input_size)
 
-    # 4) 选择绘制坐标系
-    if draw_on_orig:
-        fig, ax = plt.subplots(1, figsize=(12, 9), dpi=100)
-        ax.set_xlim(0, W); ax.set_ylim(H, 0)
-        ax.imshow(img_rgb)
+    # --- 关键修改：根据是否绘制热力图，创建不同数量的子图 ---
+    if draw_heatmaps:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=100)
+        ax_main, ax_hm_kpt, ax_hm_center = axes
+        
+        overlay_kpt, overlay_center = _draw_heatmaps(
+            display_img, preds['heatmaps'], preds['centers'], alpha=heatmap_alpha
+        )
+        ax_hm_kpt.imshow(overlay_kpt)
+        ax_hm_kpt.set_title("Keypoint Heatmap")
+        ax_hm_center.imshow(overlay_center)
+        ax_hm_center.set_title("Center Heatmap")
     else:
-        fig, ax = plt.subplots(1, figsize=(8, 8), dpi=100)
-        ax.set_xlim(0, input_size); ax.set_ylim(input_size, 0)
-        ax.imshow(input_img)
+        fig, ax = plt.subplots(1, figsize=(12, 9), dpi=100)
+        ax_main = ax
+
+    ax_main.imshow(display_img)
+    ax_main.set_title("Pose Estimation Results")
+    all_axes = fig.axes
+    for ax in all_axes:
+        ax.set_xlim(0, display_W); ax.set_ylim(display_H, 0)
+        ax.axis('off')
 
     # 5) 逐实例绘制
     for det in dets:
-        bbox = np.array(det["bbox"], dtype=np.float32)                  # [x1,y1,x2,y2] (letterbox坐标)
+        bbox = np.array(det["bbox"], dtype=np.float32)
         score = float(det["person_score"])
-        kps = np.array([(x, y, c) for (x, y, c) in det["keypoints"]])   # [K,3] (x,y,conf) letterbox坐标
+        kps = np.array([(x, y, c) for (x, y, c) in det["keypoints"]])
 
         if draw_on_orig:
-            # 将坐标还原到原图
             bbox = unletterbox_box_xyxy(bbox, W, H, scale, pad_w, pad_h)
             if len(kps) > 0:
                 pts = unletterbox_points(kps[:, :2], W, H, scale, pad_w, pad_h)
                 kps[:, :2] = pts
 
-        # 5.1 画 bbox
+        # 在主图上绘制 bbox 和骨架
         if draw_bbox:
             x1,y1,x2,y2 = bbox.tolist()
             rect = patches.Rectangle((x1, y1), x2-x1, y2-y1, linewidth=2, edgecolor='lime', facecolor='none')
-            ax.add_patch(rect)
-            ax.text(x1, max(0, y1-6), f'person: {score:.2f}', color='black',
-                    bbox=dict(facecolor='lime', alpha=0.8), fontsize=10)
+            ax_main.add_patch(rect)
+            ax_main.text(x1, max(0, y1-6), f'person: {score:.2f}', color='black',
+                         bbox=dict(facecolor='lime', alpha=0.8), fontsize=10)
 
-        # 5.2 画关键点 & 骨架
         if len(kps) > 0:
-            # 关键点
             for j, (x,y,c) in enumerate(kps):
-                if c <= 0.0 or math.isnan(x) or math.isnan(y):
-                    continue
-                _circle(ax, x, y, r=3, color="cyan", lw=1.5)
-
-            # 骨架
+                if c > keypoint_thresh and not (math.isnan(x) or math.isnan(y)):
+                    _circle(ax_main, x, y, r=3, color="cyan", lw=1.5)
+            
             if draw_skeleton:
                 for (a,b) in COCO_SKELETON:
-                    if a >= len(kps) or b >= len(kps):
-                        continue
-                    x1,y1,c1 = kps[a]; x2,y2,c2 = kps[b]
-                    if c1 > 0.0 and c2 > 0.0 and not (math.isnan(x1) or math.isnan(y1) or math.isnan(x2) or math.isnan(y2)):
-                        _line(ax, x1, y1, x2, y2, color="yellow", lw=2)
+                    if a < len(kps) and b < len(kps):
+                        x1,y1,c1 = kps[a]; x2,y2,c2 = kps[b]
+                        if c1 > keypoint_thresh and c2 > keypoint_thresh and not (math.isnan(x1) or math.isnan(y1) or math.isnan(x2) or math.isnan(y2)):
+                            _line(ax_main, x1, y1, x2, y2, color="yellow", lw=2)
 
-    ax.axis('off')
+    # 6) 保存或显示
+    fig.tight_layout()
     if save_path is not None:
-        fig.savefig(save_path, dpi=120, bbox_inches='tight', pad_inches=0.1); plt.close(fig)
-    elif show:
-        plt.show(); plt.close(fig)
-    else:
-        plt.close(fig)
+        fig.savefig(save_path, dpi=120, bbox_inches='tight', pad_inches=0.1)
+    if show:
+        plt.show()
+    
+    plt.close(fig)
