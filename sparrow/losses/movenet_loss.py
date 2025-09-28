@@ -107,13 +107,6 @@ class MoveNetLoss(nn.Module):
                 kps_masks: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         计算 MoveNet 的总损失。
-        Args:
-            preds: 模型的输出字典。
-            labels: 来自 DataLoader 的 [B, 86, Hf, Wf] 的标签张量。
-            kps_masks: 来自 DataLoader 的 [B, 17] 的关键点可见性掩码。
-        Returns:
-            total_loss: 总损失。
-            loss_dict: 包含各部分损失的字典，用于日志记录。
         """
         # 1. 从标签张量中切分出各个真值 (Ground Truth)
         gt_heatmaps = labels[:, :17, :, :]
@@ -128,32 +121,39 @@ class MoveNetLoss(nn.Module):
         loss_hm = self.focal_loss(preds['heatmaps'], gt_heatmaps)
         loss_ct = self.focal_loss(preds['centers'],  gt_centers)
 
-        # 3. 计算回归损失 (L_reg) —— 只在“中心峰值/近邻”监督 2K 通道
-        # 如果你在 dataloader 里把 center 高斯抹开了 3×3，建议把阈值放宽些（例如 0.5）
-        center_mask = (gt_centers > 0.5).float()                     # [B,1,H,W]
-        center_mask_2k = center_mask.repeat(1, 2*K, 1, 1)            # [B,2K,H,W]
-
+        # 3. 计算回归损失 (L_reg) —— 只在“中心单峰”监督
+        with torch.no_grad():
+            flat_centers = gt_centers.view(B, -1)
+            idx = flat_centers.argmax(dim=1)
+            cy = idx // W
+            cx = idx % W
+            center_1hot = torch.zeros_like(gt_centers)
+            center_1hot[torch.arange(B), 0, cy, cx] = 1.0
+        
+        center_mask_2k = center_1hot.repeat(1, 2*K, 1, 1)
         pred_regs = preds['regs'] * center_mask_2k
-        gt_regs_m = gt_regs        * center_mask_2k
+        gt_regs_m = gt_regs * center_mask_2k
         denom_reg = center_mask_2k.sum().clamp(min=1.0)
         loss_reg = self.l1_loss(pred_regs, gt_regs_m) / denom_reg
 
-        # 4. 计算偏移损失 (L_off) —— 每个关键点仅在自己的峰值位置监督对应 2 通道
-        # 若你把 offsets 标签也抹开 3×3，这里可把 0.99 放宽到 0.5
-        kpt_peak = (gt_heatmaps > 0.99).float()                      # [B,K,H,W]
-        # [B,K,1,H,W] -> 重复到 [B,K,2,H,W] -> reshape 到 [B,2K,H,W]
-        kpt_peak_2k = (kpt_peak.unsqueeze(2).repeat(1,1,2,1,1)
-                                .view(B, 2*K, H, W))                # [B,2K,H,W]
+        # 4. 计算偏移损失 (L_off) —— 每个关键点仅在“自身单峰”监督
+        with torch.no_grad():
+            flat_kpt_hms = gt_heatmaps.view(B, K, -1)
+            idx = flat_kpt_hms.argmax(dim=-1)
+            ky = idx // W
+            kx = idx % W
+            kpt_peak_2k = torch.zeros(B, 2*K, H, W, device=device)
+            for j in range(K):
+                kpt_peak_2k[torch.arange(B), 2*j,   ky[:, j], kx[:, j]] = 1.0
+                kpt_peak_2k[torch.arange(B), 2*j+1, ky[:, j], kx[:, j]] = 1.0
 
-        # 可见性 -> [B,K,1,1] -> [B,K,2,H,W] -> [B,2K,H,W]
         vis_2k = (kps_masks.view(B, K, 1, 1)
                         .repeat(1, 1, 2, H, W)
-                        .view(B, 2*K, H, W))                      # [B,2K,H,W]
-
-        off_mask = kpt_peak_2k * vis_2k                              # [B,2K,H,W]
-
+                        .view(B, 2*K, H, W))
+        
+        off_mask = kpt_peak_2k * vis_2k
         pred_offsets = preds['offsets'] * off_mask
-        gt_offsets_m = gt_offsets        * off_mask
+        gt_offsets_m = gt_offsets * off_mask
         denom_off = off_mask.sum().clamp(min=1.0)
         loss_off = self.l1_loss(pred_offsets, gt_offsets_m) / denom_off
         
@@ -163,7 +163,6 @@ class MoveNetLoss(nn.Module):
                     self.reg_weight * loss_reg +
                     self.off_weight * loss_off)
 
-        # ✅ 用 float 记录，训练循环里更稳（+=、打印都方便）
         loss_dict = {
             "total_loss":   float(total_loss.detach().item()),
             "loss_heatmap": float(loss_hm.detach().item()),
