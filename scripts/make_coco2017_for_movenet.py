@@ -252,7 +252,8 @@ def save_crop_and_ann(rec: ImgRec, src_img_dir: Path, out_img_dir: Path,
 
     # 输出文件名（保持原名直观）
     base = Path(rec.file_name).stem
-    out_name = f"{base}.jpg"
+    # ★ 用原图名 + ann_id 做唯一文件名
+    out_name = f"{base}_aid{int(rec.ann['id'])}.jpg"
     out_path = out_img_dir / out_name
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
