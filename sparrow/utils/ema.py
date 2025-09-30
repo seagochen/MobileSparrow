@@ -45,6 +45,7 @@ class EMA:
         for p in self.ema_model.parameters():
             p.requires_grad_(False)
 
+    @torch.no_grad()
     def update(self, model):
         """
         用在线模型的当前参数更新 EMA 模型。
@@ -60,14 +61,17 @@ class EMA:
         - 假设两边的 named_parameters 能一一对应（同名同结构）。
         """
         self.updates += 1
-        d = self.decay * (1 - pow(0.9, self.updates / 2000))  # 动态调整衰减率
+        d = self.decay * (1 - pow(0.9, self.updates / 2000))
 
-        with torch.no_grad():
-            model_params = dict(model.named_parameters())
-            ema_params = dict(self.ema_model.named_parameters())
+        # 1) 参数做 EMA
+        msd = dict(model.named_parameters())
+        esd = dict(self.ema_model.named_parameters())
+        for name, p in msd.items():
+            if p.requires_grad:
+                esd[name].mul_(d).add_(p.data, alpha=1 - d)
 
-            for name, p in model_params.items():
-                if p.requires_grad:
-                    ema_p = ema_params[name]
-                    # ema_p = d * ema_p + (1 - d) * p
-                    ema_p.data.mul_(d).add_(p.data, alpha=1 - d)
+        # 2) **BN 等 buffers 必须同步**（最稳妥的做法是硬拷贝）
+        mbuf = dict(model.named_buffers())
+        ebuf = dict(self.ema_model.named_buffers())
+        for name, b in mbuf.items():
+            ebuf[name].copy_(b)

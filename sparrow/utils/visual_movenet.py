@@ -1,186 +1,213 @@
+# sparrow/utils/visualizer.py
+
 import cv2
-import math
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from typing import Tuple, List, Union
+from typing import List, Dict, Union, Tuple
 
-# ---------- COCO 关键点与骨架 ----------
-# 关键点名称（可用于调试/标注）
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
+# ---------- COCO 关键点与骨架定义 ----------
+# (保持与您项目其他部分一致)
 COCO_KEYPOINTS = [
-    "nose","left_eye","right_eye","left_ear","right_ear",
-    "left_shoulder","right_shoulder","left_elbow","right_elbow","left_wrist","right_wrist",
-    "left_hip","right_hip","left_knee","right_knee","left_ankle","right_ankle"
+    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist", "left_hip", "right_hip",
+    "left_knee", "right_knee", "left_ankle", "right_ankle"
 ]
 
-# 骨架连线（COCO常用拓扑）
 COCO_SKELETON = [
-    (5, 6),   # left_shoulder - right_shoulder
-    (5, 7), (7, 9),   # left_shoulder - left_elbow - left_wrist
-    (6, 8), (8,10),   # right_shoulder - right_elbow - right_wrist
-    (11,12),          # left_hip - right_hip
-    (5,11), (6,12),   # shoulder-hip
-    (11,13), (13,15), # left_hip - left_knee - left_ankle
-    (12,14), (14,16), # right_hip - right_knee - right_ankle
-    (0,1), (0,2), (1,3), (2,4)  # face links
+    (15, 13), (13, 11), (16, 14), (14, 12), (11, 12), (5, 11), (6, 12),
+    (5, 6), (5, 7), (6, 8), (7, 9), (8, 10), (1, 2), (0, 1), (0, 2),
+    (1, 3), (2, 4)
 ]
 
-# ---------- 读图 + letterbox 到指定方形尺寸 ----------
-def load_and_letterbox(image: Union[str, np.ndarray], dst: int = 192) -> Tuple[np.ndarray, np.ndarray, int, int, float, int, int]:
+# 为骨架连接定义不同的颜色 (BGR格式)
+SKELETON_COLORS = [
+    (0, 255, 255), (0, 255, 255), (0, 255, 255), (0, 255, 255),  # 四肢 (黄色)
+    (0, 255, 0), (0, 255, 0), (0, 255, 0), (0, 255, 0),          # 肩膀/臀部连接 (绿色)
+    (255, 128, 0), (255, 128, 0), (255, 128, 0), (255, 128, 0),  # 躯干 (蓝色)
+    (255, 0, 255), (255, 0, 255), (255, 0, 255), (255, 0, 255), (255, 0, 255) # 头部 (品红色)
+]
+
+# ---------- 核心绘图函数 ----------
+
+def _draw_keypoints_and_skeleton(
+    image: np.ndarray,
+    detections: List[Dict],
+    keypoint_thresh: float
+) -> np.ndarray:
+    """在图像上绘制所有检测到的实例的关键点和骨架"""
+    canvas = image.copy()
+    for det in detections:
+        keypoints = np.array(det["keypoints"]) # [17, 3] with (x, y, conf)
+        
+        # 绘制骨架
+        for i, (p1_idx, p2_idx) in enumerate(COCO_SKELETON):
+            x1, y1, c1 = keypoints[p1_idx]
+            x2, y2, c2 = keypoints[p2_idx]
+            if c1 > keypoint_thresh and c2 > keypoint_thresh:
+                color = SKELETON_COLORS[i]
+                cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                
+        # 绘制关键点
+        for i, (x, y, conf) in enumerate(keypoints):
+            if conf > keypoint_thresh:
+                cv2.circle(canvas, (int(x), int(y)), 3, (0, 0, 255), -1) # BGR: 红色
+
+    return canvas
+
+
+def _create_heatmap_visualization(
+    image: np.ndarray,
+    heatmaps: torch.Tensor
+) -> np.ndarray:
+    """生成关键点热图的可视化图像"""
+    if heatmaps.is_cuda:
+        heatmaps = heatmaps.cpu()
+        
+    # 1. 将所有关键点热图融合成一张合成图 (取最大值)
+    composite_heatmap = torch.sigmoid(heatmaps).max(dim=0)[0].numpy()
+    
+    # 2. 归一化并应用伪彩色
+    composite_heatmap = (composite_heatmap - composite_heatmap.min()) / (composite_heatmap.max() - composite_heatmap.min() + 1e-6)
+    heatmap_colored = cv2.applyColorMap((composite_heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    
+    # 3. 将热图resize到原图大小
+    H, W, _ = image.shape
+    heatmap_resized = cv2.resize(heatmap_colored, (W, H))
+    
+    # 4. 将热图与原图叠加
+    image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) # OpenCV使用BGR
+    overlay = cv2.addWeighted(image_bgr, 0.5, heatmap_resized, 0.5, 0)
+    
+    return cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+
+
+def visualize_detections(
+    image: Union[str, np.ndarray],
+    detections: List[Dict],
+    heatmaps: torch.Tensor,
+    keypoint_thresh: float = 0.1
+) -> np.ndarray:
     """
-    返回:
-      img_rgb      : 原图 (H, W, 3), RGB
-      input_img    : letterbox 后的 dst x dst RGB uint8
-      h, w         : 原图高宽
-      scale        : dst / max(h, w)
-      pad_h, pad_w : 高/宽方向的 padding (各一半)
+    主可视化函数，生成左右并排的对比图。
+    左图：原图 + 关键点和骨架
+    右图：原图 + 关键点热图叠加
+
+    Args:
+        image (Union[str, np.ndarray]): 图像路径或已加载的RGB图像 (H, W, 3)。
+        detections (List[Dict]): 来自解码器的检测结果列表。
+        heatmaps (torch.Tensor): 模型输出的原始关键点热图 [K, Hf, Wf]。
+        keypoint_thresh (float): 绘制关键点和骨架的置信度阈值。
+
+    Returns:
+        np.ndarray: 拼接后的可视化图像 (RGB格式)。
     """
     if isinstance(image, str):
-        img_bgr = cv2.imread(image)
-        assert img_bgr is not None, f"Image not found: {image}"
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        image_rgb = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)
     else:
-        arr = np.asarray(image)
-        if arr.ndim == 2:
-            arr = np.stack([arr]*3, axis=-1)
-        elif arr.shape[2] == 4:
-            arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
-        else:
-            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB) if arr.dtype != np.uint8 else arr[..., ::-1] if False else arr
-        img_rgb = arr
+        image_rgb = image.copy()
 
-    h, w = img_rgb.shape[:2]
-    scale = dst / max(h, w)
-    resized_h, resized_w = int(round(h * scale)), int(round(w * scale))
-    img_resized = cv2.resize(img_rgb, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR)
+    # 绘制左图：关键点和骨架
+    skeleton_viz = _draw_keypoints_and_skeleton(image_rgb, detections, keypoint_thresh)
+    
+    # 绘制右图：热图叠加
+    heatmap_viz = _create_heatmap_visualization(image_rgb, heatmaps)
+    
+    # 将两张图拼接
+    h1, w1, _ = skeleton_viz.shape
+    h2, w2, _ = heatmap_viz.shape
+    
+    # 确保两张图高度一致
+    if h1 != h2:
+        target_h = max(h1, h2)
+        skeleton_viz = cv2.resize(skeleton_viz, (int(w1 * target_h / h1), target_h))
+        heatmap_viz = cv2.resize(heatmap_viz, (int(w2 * target_h / h2), target_h))
 
-    input_img = np.full((dst, dst, 3), 114, dtype=np.uint8)
-    pad_h = (dst - resized_h) // 2
-    pad_w = (dst - resized_w) // 2
-    input_img[pad_h:pad_h + resized_h, pad_w:pad_w + resized_w] = img_resized
-    return img_rgb, input_img, h, w, scale, pad_h, pad_w
+    combined_image = np.hstack((skeleton_viz, heatmap_viz))
+    
+    return combined_image
 
-# ---------- 将 letterbox 坐标还原到原图 ----------
-def unletterbox_points(points: np.ndarray, orig_w: int, orig_h: int, scale: float, pad_w: int, pad_h: int) -> np.ndarray:
-    """
-    points: [N,2] 在 letterbox 图（dst x dst）中像素坐标
-    返回：对应到原图坐标的点
-    """
-    pts = points.copy()
-    pts[:, 0] = (pts[:, 0] - pad_w) / scale
-    pts[:, 1] = (pts[:, 1] - pad_h) / scale
-    pts[:, 0] = np.clip(pts[:, 0], 0, orig_w - 1)
-    pts[:, 1] = np.clip(pts[:, 1], 0, orig_h - 1)
-    return pts
 
-def unletterbox_box_xyxy(box: np.ndarray, orig_w: int, orig_h: int, scale: float, pad_w: int, pad_h: int) -> np.ndarray:
-    x1,y1,x2,y2 = box
-    pts = np.array([[x1,y1],[x2,y2]], dtype=np.float32)
-    pts = unletterbox_points(pts, orig_w, orig_h, scale, pad_w, pad_h)
-    x1,y1 = pts[0]; x2,y2 = pts[1]
-    return np.array([x1,y1,x2,y2], dtype=np.float32)
-
-# ---------- 颜色/绘制 ----------
-def _circle(ax, x, y, r=3, color="cyan", lw=1.5):
-    circ = plt.Circle((x, y), r, color=color, fill=True, alpha=0.9)
-    ax.add_patch(circ)
-
-def _line(ax, x1, y1, x2, y2, color="yellow", lw=2):
-    ax.plot([x1, x2], [y1, y2], color=color, linewidth=lw)
-
-# ---------- 主流程：可视化（单张） ----------
-@torch.no_grad()
-def visualize_movenet(
-    model,
-    image: Union[np.ndarray, str],
-    device,
-    decoder,                     # 传入 decode_movenet_outputs
-    input_size: int = 192,       # 模型输入
-    stride: int = 8,             # 输出步幅（P3=8；如果你上采样到1/4，请改为4）
-    topk_centers: int = 5,
-    center_thresh: float = 0.2,
-    keypoint_thresh: float = 0.05,
-    draw_bbox: bool = True,
-    draw_skeleton: bool = True,
-    draw_on_orig: bool = True,   # 在原图上画；否则在 letterboxed 图上画
-    save_path: str | None = None,
-    show: bool = False,
-):
-    """
-    根据 MoveNet 输出，绘制 bbox + person_score + 关键点 + 骨架。
-    """
-    # 1) 读图 + letterbox
-    img_rgb, input_img, H, W, scale, pad_h, pad_w = load_and_letterbox(image, dst=input_size)
-
-    # 2) 前向
-    img_tensor = (torch.from_numpy(input_img.transpose(2, 0, 1)).float() / 255.0).unsqueeze(0).to(device)
-    model.eval()
-    preds = model(img_tensor)  # dict: heatmaps/centers/regs/offsets
-
-    # 3) 解码（注意：img_size 传 letterbox 后的输入大小）
-    dets = decoder(
-        preds,
-        img_size=(input_size, input_size),
-        stride=stride,
-        topk_centers=topk_centers,
-        center_thresh=center_thresh,
-        keypoint_thresh=keypoint_thresh,
-        regs_in_pixels=True
+# ---------- [示例] 如何使用此工具 ----------
+if __name__ == '__main__':
+    # 这是一个演示如何调用 visualize_detections 的示例
+    # 您需要根据您的项目结构，提供模型、解码器和测试图片
+    
+    # 1. 导入您的模型和解码器
+    # 假设您的文件都在上一级目录
+    import sys
+    sys.path.append('..')
+    from models.movenet_fpn import MoveNet_FPN, decode_movenet_outputs
+    
+    # 2. 参数设置 (与您的训练脚本保持一致)
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    INPUT_SIZE = 192
+    STRIDE = 4
+    TEST_IMAGE_PATH = "../../res/girl_with_bags.png" # 请确保路径正确
+    
+    # 3. 加载模型 (这里仅为演示，不加载预训练权重)
+    import timm
+    backbone = timm.create_model(
+        'mobilenetv3_large_100', pretrained=False, features_only=True, out_indices=(2, 3, 4)
     )
-
-    # 4) 选择绘制坐标系
-    if draw_on_orig:
-        fig, ax = plt.subplots(1, figsize=(12, 9), dpi=100)
-        ax.set_xlim(0, W); ax.set_ylim(H, 0)
-        ax.imshow(img_rgb)
+    model = MoveNet_FPN(backbone, upsample_to_quarter=True, out_stride=STRIDE).to(DEVICE)
+    model.eval()
+    
+    # 4. 图像预处理 (与训练时严格一致！)
+    image_bgr = cv2.imread(TEST_IMAGE_PATH)
+    if image_bgr is None:
+        print(f"Error: 无法加载图片，请检查路径: {TEST_IMAGE_PATH}")
     else:
-        fig, ax = plt.subplots(1, figsize=(8, 8), dpi=100)
-        ax.set_xlim(0, input_size); ax.set_ylim(input_size, 0)
-        ax.imshow(input_img)
-
-    # 5) 逐实例绘制
-    for det in dets:
-        bbox = np.array(det["bbox"], dtype=np.float32)                  # [x1,y1,x2,y2] (letterbox坐标)
-        score = float(det["person_score"])
-        kps = np.array([(x, y, c) for (x, y, c) in det["keypoints"]])   # [K,3] (x,y,conf) letterbox坐标
-
-        if draw_on_orig:
-            # 将坐标还原到原图
-            bbox = unletterbox_box_xyxy(bbox, W, H, scale, pad_w, pad_h)
-            if len(kps) > 0:
-                pts = unletterbox_points(kps[:, :2], W, H, scale, pad_w, pad_h)
-                kps[:, :2] = pts
-
-        # 5.1 画 bbox
-        if draw_bbox:
-            x1,y1,x2,y2 = bbox.tolist()
-            rect = patches.Rectangle((x1, y1), x2-x1, y2-y1, linewidth=2, edgecolor='lime', facecolor='none')
-            ax.add_patch(rect)
-            ax.text(x1, max(0, y1-6), f'person: {score:.2f}', color='black',
-                    bbox=dict(facecolor='lime', alpha=0.8), fontsize=10)
-
-        # 5.2 画关键点 & 骨架
-        if len(kps) > 0:
-            # 关键点
-            for j, (x,y,c) in enumerate(kps):
-                if c <= 0.0 or math.isnan(x) or math.isnan(y):
-                    continue
-                _circle(ax, x, y, r=3, color="cyan", lw=1.5)
-
-            # 骨架
-            if draw_skeleton:
-                for (a,b) in COCO_SKELETON:
-                    if a >= len(kps) or b >= len(kps):
-                        continue
-                    x1,y1,c1 = kps[a]; x2,y2,c2 = kps[b]
-                    if c1 > 0.0 and c2 > 0.0 and not (math.isnan(x1) or math.isnan(y1) or math.isnan(x2) or math.isnan(y2)):
-                        _line(ax, x1, y1, x2, y2, color="yellow", lw=2)
-
-    ax.axis('off')
-    if save_path is not None:
-        fig.savefig(save_path, dpi=120, bbox_inches='tight', pad_inches=0.1); plt.close(fig)
-    elif show:
-        plt.show(); plt.close(fig)
-    else:
-        plt.close(fig)
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        
+        # Letterbox + 归一化
+        h, w, _ = image_rgb.shape
+        scale = INPUT_SIZE / max(h, w)
+        new_w, new_h = int(w * scale), int(h * scale)
+        resized_img = cv2.resize(image_rgb, (new_w, new_h))
+        
+        padded_img = np.zeros((INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
+        top, left = (INPUT_SIZE - new_h) // 2, (INPUT_SIZE - new_w) // 2
+        padded_img[top:top+new_h, left:left+new_w] = resized_img
+        
+        transform = A.Compose([
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
+        input_tensor = transform(image=padded_img)['image'].unsqueeze(0).to(DEVICE)
+        
+        # 5. 模型推理
+        with torch.no_grad():
+            preds = model(input_tensor)
+            
+        # 6. 解码
+        detections = decode_movenet_outputs(
+            preds, 
+            img_size=(h, w), # 注意：传入原图尺寸
+            stride=STRIDE
+        )
+        print(f"检测到 {len(detections)} 个人体实例。")
+        
+        # 7. 可视化
+        # 注意：可视化函数需要原图、解码结果和模型原始热图
+        viz_image = visualize_detections(
+            image=image_rgb,
+            detections=detections,
+            heatmaps=preds['heatmaps'][0], # 传入batch中的第一张图的热图
+            keypoint_thresh=0.1
+        )
+        
+        # 8. 显示和保存
+        plt.figure(figsize=(12, 6))
+        plt.imshow(viz_image)
+        plt.axis('off')
+        plt.tight_layout()
+        
+        save_path = "visualization_result.png"
+        plt.savefig(save_path)
+        print(f"可视化结果已保存到: {save_path}")
+        plt.show()

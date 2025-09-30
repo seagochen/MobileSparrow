@@ -21,6 +21,13 @@ COCO_CLASSES = [
 ]
 
 
+def update_classes(labels: list):
+    global COCO_CLASSES
+    
+    if len(labels) > 0:
+        COCO_CLASSES = labels
+
+
 # -----------------------------
 # 预处理：读图 + letterbox 到 320x320
 # -----------------------------
