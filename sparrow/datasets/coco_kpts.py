@@ -1,18 +1,21 @@
 # %% [markdown]
-# # 加载COCO数据集
+# # COCO数据集Dataloader
 # 
-# 为了便于测试我们的 `MoveNet`，我们使用标准的 `COCO` 数据集。但为了加载这个数据集，并应用于我们的模型里，需要一些特别的设计。
+# COCO 17 keypoints DataLoader (preprocessed + strong aug)
+# 适用：使用 make_coco2017_for_movenet.py 生成的“单人方图”数据集
+# 功能：
+#  * 读取预处理后的图片 + JSON 坐标（不再做第二次裁剪）
+#  * Albumentations 几何增强：Flip / Affine(缩放、平移、旋转) —— 同步作用于关键点
+#  * 可选颜色增强
+#  * 统一 Resize 到 img_size，保证 batch 可堆叠
+#  * 稳健的标签编码：高斯+邻域offset
 
 # %%
-# !pip -q install albumentations
-
-# %% [markdown]
-# ## 导入依赖包
-
-# %%
-import json, os
+import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from collections import defaultdict
 
 import cv2
 import numpy as np
@@ -23,421 +26,356 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 # %% [markdown]
-# ## 辅助工具函数
+# ## 辅助工具
 
 # %% [markdown]
 # ### `draw_gaussian`
 
 # %%
-def draw_gaussian(heatmap: np.ndarray, center: Tuple[int, int], radius: int, k: float = 1.0):
-    """在 heatmap 上画带裁剪的高斯核。heatmap: H×W；center: (x, y)"""
+def draw_gaussian(heatmap: np.ndarray, center_xy: Tuple[float, float], radius: int):
+    H, W = heatmap.shape
+    cx, cy = float(center_xy[0]), float(center_xy[1])
 
-    def gaussian2d(shape: Tuple[int, int], sigma: float) -> np.ndarray:
-        h, w = shape
-        y = np.arange(0, h, 1, dtype=np.float32)
-        x = np.arange(0, w, 1, dtype=np.float32)
-        yy, xx = np.meshgrid(y, x, indexing="ij")
-        cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
-        g = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma ** 2))
-        return g
-
-    diameter = 2 * radius + 1
-    gaussian = gaussian2d((diameter, diameter), sigma=diameter / 6.0)
-
-    x, y = int(center[0]), int(center[1])
-    h, w = heatmap.shape
-
-    left, right = min(x, radius), min(w - x, radius + 1)
-    top, bottom = min(y, radius), min(h - y, radius + 1)
-
-    if right <= 0 or bottom <= 0 or left <= 0 or top <= 0:
+    x0 = max(0, int(np.floor(cx - radius)))
+    x1 = min(W - 1, int(np.ceil(cx + radius)))
+    y0 = max(0, int(np.floor(cy - radius)))
+    y1 = min(H - 1, int(np.ceil(cy + radius)))
+    if x1 < x0 or y1 < y0:
         return
 
-    masked_hm = heatmap[y - top:y + bottom, x - left:x + right]
-    masked_g = gaussian[radius - top:radius + bottom, radius - left:radius + right]
-    np.maximum(masked_hm, masked_g * k, out=masked_hm)
+    xs = np.arange(x0, x1 + 1, dtype=np.float32)
+    ys = np.arange(y0, y1 + 1, dtype=np.float32)
+    X, Y = np.meshgrid(xs, ys)
+    sigma = max(1.0, radius / 3.0)
+    G = np.exp(-((X - cx) ** 2 + (Y - cy) ** 2) / (2 * sigma ** 2)).astype(np.float32)
+
+    patch = heatmap[y0:y1 + 1, x0:x1 + 1]
+    np.maximum(patch, G, out=patch)
 
 # %% [markdown]
-# ### `get_center_from_kps`
+# ### `encode_single_targets`
 
 # %%
-def get_center_from_kps(kps_xyv: np.ndarray) -> Tuple[float, float]:
-    """kps_xyv: [17,3]，只用 v>0 的点做均值"""
-    vis = kps_xyv[:, 2] > 0
-    if vis.sum() == 0:
-        cx = kps_xyv[:, 0].mean()
-        cy = kps_xyv[:, 1].mean()
+def encode_single_targets(kps_xyv: np.ndarray, Hf: int, Wf: int, stride: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    (J, Hf, Wf) heatmaps, (2J, Hf, Wf) offsets, (J,) mask
+    - offset 在高斯中心邻域写入（r_off=1），避免 argmax 落邻格时读不到 offset。
+    """
+    J = kps_xyv.shape[0]
+    heatmaps = np.zeros((J, Hf, Wf), dtype=np.float32)
+    offsets  = np.zeros((2 * J, Hf, Wf), dtype=np.float32)
+    kps_mask = np.zeros((J,), dtype=np.float32)
+
+    kps_f = kps_xyv.copy().astype(np.float32)
+    kps_f[:, :2] /= float(stride)
+
+    vis = kps_f[:, 2] > 0
+    if vis.any():
+        xs, ys = kps_f[vis, 0], kps_f[vis, 1]
+        side = max(1.0, float(max(xs.max() - xs.min(), ys.max() - ys.min())))
     else:
-        cx = kps_xyv[vis, 0].mean()
-        cy = kps_xyv[vis, 1].mean()
-    return float(cx), float(cy)
+        side = max(Hf, Wf) / 4.0
+
+    r_kpt = max(1, int(round(0.025 * side)))
+    r_off = 1
+
+    for j in range(J):
+        if kps_f[j, 2] <= 0:
+            continue
+        xj, yj = float(kps_f[j, 0]), float(kps_f[j, 1])
+        draw_gaussian(heatmaps[j], (xj, yj), r_kpt)
+        kps_mask[j] = 1.0
+
+        cx, cy = int(np.round(xj)), int(np.round(yj))
+        x0, x1 = max(0, cx - r_off), min(Wf - 1, cx + r_off)
+        y0, y1 = max(0, cy - r_off), min(Hf - 1, cy + r_off)
+
+        us = np.arange(x0, x1 + 1, dtype=np.float32)
+        vs = np.arange(y0, y1 + 1, dtype=np.float32)
+        U, V = np.meshgrid(us, vs)
+
+        offsets[2 * j,     y0:y1 + 1, x0:x1 + 1] = (xj - U).astype(np.float32)
+        offsets[2 * j + 1, y0:y1 + 1, x0:x1 + 1] = (yj - V).astype(np.float32)
+
+    return heatmaps, offsets, kps_mask
 
 # %% [markdown]
-# ## 数据集加载类
+# ### `recompute_visibility`
 
 # %%
-class CocoKeypointsDataset(Dataset):
-    """
-    COCO 姿态估计数据集（内聚版）。
-    - 使用 Albumentations 进行数据增强
-    - 将每个 image 中的每个 person 展开成一条独立样本
-    - 统一完成 letterbox、以及 supervision 编码
-    - 输出: (img_tensor [3,H,W], label_tensor [86,Hf,Wf], kps_mask [17], img_path)
-    """
-    
-    # COCO 17 点左右翻转索引对
-    FLIP_PAIRS = [
-        (1, 2), (3, 4), (5, 6), (7, 8),
-        (9, 10), (11, 12), (13, 14), (15, 16)
-    ]
-    
+
+def recompute_visibility(kps_xyv: np.ndarray, w: int, h: int) -> np.ndarray:
+    """增强后基于边界重算 visibility（原本 v>0 的点若出界则置 0）"""
+    kps = kps_xyv.copy()
+    v0 = kps[:, 2] > 0
+    inb = (kps[:, 0] >= 0) & (kps[:, 0] < w) & (kps[:, 1] >= 0) & (kps[:, 1] < h)
+    kps[:, 2] = (v0 & inb).astype(np.float32)
+    return kps
+
+
+# %% [markdown]
+# ## Dataset
+# 
+# 预处理和数据增强
+
+# %%
+class CocoKeypointsDatasetAug(Dataset):
     def __init__(self,
                  img_root: str,
                  ann_path: str,
                  img_size: int,
                  target_stride: int,
                  is_train: bool,
-                 skip_crowd: bool = True,
-                 aug_cfg: Dict[str, Any] = None):
+                 aug_cfg: Dict[str, Any] = None,
+                 min_kps_count: int = 1,
+                 index_remap: List[int] = None):
+        """
+        读取“预处理后的 COCO 单人方图”并做几何/颜色增强
+        """
         super().__init__()
         self.img_root = os.path.abspath(img_root)
-        self.ann_path = ann_path
         self.img_size = int(img_size)
-        self.stride = int(target_stride)
+        self.stride   = int(target_stride)
         self.is_train = bool(is_train)
-        self.aug_cfg = aug_cfg if aug_cfg is not None else {}
-        self.skip_crowd = bool(skip_crowd)
-        
-        assert self.img_size % self.stride == 0, \
-            f"img_size({self.img_size}) must be divisible by stride({self.stride})"
+        self.aug_cfg  = aug_cfg or {}
+        self.index_remap = np.array(index_remap if index_remap is not None else np.arange(17))
+
+        assert self.img_size % self.stride == 0, "img_size must be divisible by stride"
         self.Hf = self.img_size // self.stride
         self.Wf = self.img_size // self.stride
 
-        # --- 加载与预处理标注 (与原版相同) ---
-        self._ann_images: Dict[int, Dict[str, Any]] = {}
-        self.items = self._load_annotations()
+        self.items = self._load_annotations(ann_path, min_kps_count)
 
-        # --- 核心改动：构建 Albumentations 增强管道 ---
-        self.transform = self._build_transforms()
+        # --- Albumentations pipeline ---
+        # 几何：先做翻转/仿射（保持方形），最后统一 Resize -> img_size
+        geo_transforms = [
+            A.HorizontalFlip(p=float(self.aug_cfg.get("p_flip", 0.5))),
+            A.Affine(
+                scale=(1.0 + self.aug_cfg.get("scale_min", -0.2),
+                       1.0 + self.aug_cfg.get("scale_max",  0.2)),
+                translate_percent=(0.0, self.aug_cfg.get("translate", 0.08)),
+                rotate=(-abs(self.aug_cfg.get("rotate", 30.0)),
+                         abs(self.aug_cfg.get("rotate", 30.0))),
+                fit_output=False,                 # 保持尺寸不变
+                cval=114, mode=cv2.BORDER_CONSTANT, p=1.0
+            ),
+            A.Resize(self.img_size, self.img_size, interpolation=cv2.INTER_LINEAR)
+        ]
 
-    def _build_transforms(self) -> A.Compose:
-        """根据训练/验证模式和配置构建增强管道"""
-        transforms = []
-        # Letterbox 填充
-        transforms.append(A.LongestMaxSize(max_size=self.img_size))
-        transforms.append(A.PadIfNeeded(
-            min_height=self.img_size,
-            min_width=self.img_size,
-            border_mode=cv2.BORDER_CONSTANT,
-            value=(114, 114, 114)
-        ))
+        color_transforms = []
+        if self.aug_cfg.get("color", True):
+            color_transforms += [
+                A.ColorJitter(
+                    brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05,
+                    p=float(self.aug_cfg.get("p_color", 0.8))
+                ),
+                A.ToFloat(max_value=255.0, p=0.0)  # 占位，无实际变更
+            ]
 
-        if self.is_train:
-            # 训练时使用的增强
-            if self.aug_cfg.get("use_flip", True):
-                transforms.append(A.HorizontalFlip(p=0.5))
-            
-            # 几何变换 (旋转, 缩放)
-            transforms.append(A.ShiftScaleRotate(
-                shift_limit=0, # 平移由后续的仿射处理
-                scale_limit=self.aug_cfg.get("scale_range", (-0.25, 0.25)), # (e.g., 0.75-1.25)
-                rotate_limit=self.aug_cfg.get("rotate_deg", 30),
-                p=0.7,
-                border_mode=cv2.BORDER_CONSTANT,
-                value=(114, 114, 114)
-            ))
-            
-            # 颜色增强
-            if self.aug_cfg.get("use_color_aug", True):
-                transforms.append(A.HueSaturationValue(p=0.5))
-                transforms.append(A.RandomBrightnessContrast(p=0.5))
-        
-        # 归一化和转换为 Tensor
-        transforms.append(A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
-        transforms.append(ToTensorV2())
-        
-        # !!! 关键：定义如何处理关键点 !!!
-        keypoint_params = A.KeypointParams(
-            format='xy', # 输入格式是 (x, y)
-            label_fields=['keypoint_labels'], # 翻转时需要交换的标签
-            remove_invisible=False # 保留变换后超出图像范围的点
+        self.albu = A.Compose(
+            geo_transforms + color_transforms,
+            keypoint_params=A.KeypointParams(format="xy", remove_invisible=False)
         )
-        return A.Compose(transforms, keypoint_params=keypoint_params)
 
-    # _load_annotations 和 _encode_targets 方法可以保持不变 (从原文件复制)
-    def _load_annotations(self) -> List[Tuple[str, Dict[str, Any]]]:
-        with open(self.ann_path, "r") as f:
+        self.normalize_to_tensor = A.Compose([
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
+
+    def _load_annotations(self, ann_path: str, min_kps: int):
+        with open(ann_path, "r") as f:
             ann_json = json.load(f)
 
-        images = ann_json.get("images", [])
-        annotations = ann_json.get("annotations", [])
-        categories = ann_json.get("categories", [])
+        img_id_to_info = {im["id"]: im for im in ann_json["images"]}
+        person_id = next(c["id"] for c in ann_json["categories"] if c["name"] == "person")
 
-        self._ann_images = {im["id"]: im for im in images}
-        person_id = next((c.get("id") for c in categories if c.get("name") == "person"), 1)
-        anns_all = [a for a in annotations if a.get("category_id", person_id) == person_id]
+        img_id_to_anns = defaultdict(list)
+        for ann in ann_json["annotations"]:
+            if ann["category_id"] == person_id and not ann.get("iscrowd", 0):
+                img_id_to_anns[ann["image_id"]].append(ann)
 
-        # 过滤数据
-        if self.skip_crowd:
-            anns_all = [a for a in anns_all if a.get("iscrowd", 0) == 0 and a.get("num_keypoints", 0) > 0]
-
-        img_id_to_anns: Dict[int, List[Dict[str, Any]]] = {}
-        for a in anns_all:
-            img_id_to_anns.setdefault(a["image_id"], []).append(a)
-
-        items: List[Tuple[str, Dict[str, Any]]] = []
+        items = []
         for img_id, anns in img_id_to_anns.items():
-            info = self._ann_images.get(img_id)
-            if not info: continue
-            file_name = info.get("file_name")
-            if not file_name: continue
-            path = os.path.abspath(os.path.join(self.img_root, file_name))
-            if not os.path.isfile(path): continue
+            img_info = img_id_to_info.get(img_id)
+            if not img_info:
+                continue
+            img_path = os.path.join(self.img_root, img_info["file_name"])
+            if not os.path.exists(img_path):
+                continue
             for person_ann in anns:
-                items.append((path, person_ann))
-
+                if person_ann.get("num_keypoints", 0) >= min_kps:
+                    items.append((img_path, person_ann))
         if not items:
-            raise FileNotFoundError(f"No valid items found under: {self.img_root} with {self.ann_path}")
+            raise RuntimeError(f"No valid items under: {self.img_root} with {ann_path}")
+        print(f"[Aug] Loaded {len(items)} samples from {os.path.basename(ann_path)}")
         return items
-
-
-    def _encode_targets(self, kps_xyv: np.ndarray, center_xy: Tuple[float, float]):
-        J = 17
-        heatmaps = np.zeros((J, self.Hf, self.Wf), dtype=np.float32)
-        centers = np.zeros((1, self.Hf, self.Wf), dtype=np.float32)
-        regs = np.zeros((2 * J, self.Hf, self.Wf), dtype=np.float32)
-        offsets = np.zeros((2 * J, self.Hf, self.Wf), dtype=np.float32)
-        kps_mask = np.zeros((J,), dtype=np.float32)
-        kps_f = kps_xyv.copy()
-        kps_f[:, :2] /= self.stride
-        vis = (kps_f[:, 2] > 0)
-        if np.any(vis):
-            xs, ys = kps_f[vis, 0], kps_f[vis, 1]
-            w_box, h_box = float(xs.max() - xs.min()), float(ys.max() - ys.min())
-            side = max(1.0, max(w_box, h_box))
-        else:
-            side = float(max(self.Wf, self.Hf)) / 4.0
-        r_kpt = max(1, int(round(0.025 * side)))
-        r_ctr = max(2, int(round(0.035 * side)))
-        for j in range(J):
-            if kps_f[j, 2] > 0:
-                xj, yj = kps_f[j, 0].item(), kps_f[j, 1].item()
-                if 0 <= xj < self.Wf and 0 <= yj < self.Hf:
-                    draw_gaussian(heatmaps[j], (int(round(xj)), int(round(yj))), r_kpt)
-                    kps_mask[j] = 1.0
-        cx, cy = center_xy[0] / self.stride, center_xy[1] / self.stride
-        if 0 <= cx < self.Wf and 0 <= cy < self.Hf:
-            draw_gaussian(centers[0], (int(round(cx)), int(round(cy))), r_ctr)
-
-        cx_i, cy_i = int(round(cx)), int(round(cy))
-
-        # # === 使用这个稀疏的版本 ===
-        # cx_i, cy_i = int(np.clip(np.floor(cx + 0.5), 0, self.Wf - 1)), int(np.clip(np.floor(cy + 0.5), 0, self.Hf - 1))
-        # for j in range(J):
-        #     if kps_mask[j] > 0:
-        #         regs[2*j:2*j+2, cy_i, cx_i] = kps_f[j, :2] - np.array([cx, cy])
-        # for j in range(J):
-        #     if kps_mask[j] > 0:
-        #         xj, yj = kps_f[j, :2]
-        #         gx, gy = int(np.clip(np.floor(xj+0.5),0,self.Wf-1)), int(np.clip(np.floor(yj+0.5),0,self.Hf-1))
-        #         offsets[2*j:2*j+2, gy, gx] = np.array([xj-gx, yj-gy])
-
-        # 修改 regs 的生成方式，从单点扩展为小区域
-        reg_radius = 2  # 生成一个 5x5 的监督区域
-        y0, y1 = max(0, cy_i - reg_radius), min(self.Hf, cy_i + reg_radius + 1)
-        x0, x1 = max(0, cx_i - reg_radius), min(self.Wf, cx_i + reg_radius + 1)
-
-        for j in range(J):
-            if kps_mask[j] > 0:
-                reg_vec = kps_f[j, :2] - np.array([cx, cy], dtype=np.float32)
-                # 在 5x5 区域内都赋值
-                regs[2*j:2*j+2, y0:y1, x0:x1] = reg_vec[:, None, None]
-
-        # offsets 的生成方式保持稀疏即可，是正确的
-        for j in range(J):
-            if kps_mask[j] > 0:
-                xj, yj = kps_f[j, :2]
-                gx, gy = int(np.clip(np.floor(xj+0.5), 0, self.Wf-1)), int(np.clip(np.floor(yj+0.5), 0, self.Hf-1))
-                offsets[2*j:2*j+2, gy, gx] = np.array([xj-gx, yj-gy])
-    
-        return heatmaps, centers, regs, offsets, kps_mask
 
     def __len__(self):
         return len(self.items)
 
     def __getitem__(self, idx: int):
-        img_path, person = self.items[idx]
-        img = cv2.imread(img_path)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img_path, person_ann = self.items[idx]
 
-        # 准备原始关键点和标签
-        kps_all = np.array(person["keypoints"], dtype=np.float32).reshape(-1, 3)
-        kps_xy = kps_all[:, :2]
-        kps_v = kps_all[:, 2]
-        
-        # 准备用于翻转时交换的标签
-        keypoint_labels = np.arange(17)
-        if self.is_train and self.aug_cfg.get("use_flip", True):
-            # albumentations 的 HorizontalFlip 需要知道哪些标签对需要交换
-            # 我们通过修改标签，然后反向映射来实现
-            keypoint_labels_flipped = keypoint_labels.copy()
-            for a, b in self.FLIP_PAIRS:
-                keypoint_labels_flipped[a] = b
-                keypoint_labels_flipped[b] = a
-        
-        # 应用增强
-        transformed = self.transform(
-            image=img,
-            keypoints=kps_xy,
-            keypoint_labels=keypoint_labels if not (self.is_train and self.aug_cfg.get("use_flip", True)) else keypoint_labels_flipped
-        )
-        
-        img_t = transformed['image']
-        kps_mapped_xy = np.array(transformed['keypoints'], dtype=np.float32)
+        # 读图（预处理阶段已方形裁剪）
+        img_bgr = cv2.imread(img_path)
+        if img_bgr is None:
+            raise FileNotFoundError(f"Failed to read image: {img_path}")
+        img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-        # 重新组合 kps
-        if kps_mapped_xy.shape[0] != 17:
-             # 如果增强后所有点都出界了，补一个空的
-             kps_mapped_xy = np.zeros((17, 2), dtype=np.float32)
+        # 关键点 (x,y,v)
+        kps = np.array(person_ann["keypoints"], dtype=np.float32).reshape(-1, 3)
+        kps = kps[self.index_remap]
 
-        # 如果发生了翻转，需要把坐标和可见性换回来
-        if len(transformed['keypoint_labels']) > 0 and not np.array_equal(transformed['keypoint_labels'], keypoint_labels):
-            remap_indices = np.argsort(transformed['keypoint_labels'])
-            kps_mapped_xy = kps_mapped_xy[remap_indices]
-            kps_v = kps_v[remap_indices]
+        # --- Albumentations：几何/颜色增强（同步变换 keypoints） ---
+        # 只把 (x,y) 传进去；v 先保留，增强后再基于边界重算
+        kps_xy = [(float(x), float(y)) for x, y, v in kps]
+        out = self.albu(image=img, keypoints=kps_xy)
+        aug_img = out["image"]
+        aug_kps_xy = np.array(out["keypoints"], dtype=np.float32).reshape(-1, 2)
 
-        kps_mapped = np.hstack([kps_mapped_xy, kps_v[:, np.newaxis]])
+        # 组合回 (x,y,v) 并重算可见性
+        kps_aug = np.concatenate([aug_kps_xy, kps[:, 2:3]], axis=1)
+        h, w = aug_img.shape[:2]
+        # 边界裁剪，防止 round 落到边外
+        eps = 1e-3
+        kps_aug[:, 0] = np.clip(kps_aug[:, 0], 0.0, w - eps)
+        kps_aug[:, 1] = np.clip(kps_aug[:, 1], 0.0, h - eps)
+        kps_aug = recompute_visibility(kps_aug, w, h)
 
-        # 中心点计算 (逻辑不变)
-        cx, cy = get_center_from_kps(kps_mapped)
-        if not (np.isfinite(cx) and np.isfinite(cy)):
-            cx = cy = float(self.img_size * 0.5)
+        # 归一化 + ToTensor
+        img_t = self.normalize_to_tensor(image=aug_img)["image"]
 
-        # 生成 supervision (逻辑不变)
-        heatmaps, centers, regs, offsets, kps_mask = self._encode_targets(kps_mapped, (cx, cy))
-        label = np.concatenate([heatmaps, centers, regs, offsets], axis=0)
-        
-        label_t = torch.from_numpy(label).float()
-        kps_mask_t = torch.from_numpy(kps_mask).float()
+        # 监督编码
+        heatmaps, offsets, kps_mask = encode_single_targets(kps_aug, self.Hf, self.Wf, self.stride)
+        label = np.concatenate([heatmaps, offsets], axis=0)
 
-        return img_t, label_t, kps_mask_t, img_path
+        return img_t, torch.from_numpy(label).float(), torch.from_numpy(kps_mask).float(), img_path
+
 
 # %% [markdown]
-# ## DataLoader 工厂方法
+# ## 工厂化方法
 
 # %%
-def create_kpts_dataloader(
+def create_kpts_dataloader_aug(
         dataset_root: str,
         img_size: int,
         batch_size: int,
         target_stride: int,
         num_workers: int,
         pin_memory: bool,
-        aug_cfg: Dict[str, Any],
-        is_train: bool
+        is_train: bool,
+        aug_cfg: Dict[str, Any] = None,
+        index_remap: List[int] = None
 ) -> DataLoader:
     """
-    工厂函数：创建姿态估计 DataLoader。
-    - 兼容 <root>/train2017 和 <root>/images/train2017 两种结构
-    - 训练集支持完整增广；验证集默认关闭大部分增广，并采用固定半径（更稳定的评估）
+    dataset_root 指向预处理输出根目录（包含 images/*2017 与 annotations/）
     """
     img_dir_name = "train2017" if is_train else "val2017"
-    ann_file_name = "person_keypoints_train2017.json" if is_train else "person_keypoints_val2017.json"
+    ann_file_name = f"person_keypoints_{img_dir_name}.json"
 
     root_path = Path(dataset_root)
     img_root = root_path / "images" / img_dir_name
     if not img_root.is_dir():
-        img_root = root_path / img_dir_name
+        img_root = root_path / img_dir_name  # 兼容
     ann_path = root_path / "annotations" / ann_file_name
 
     if not img_root.is_dir() or not ann_path.is_file():
         raise FileNotFoundError(f"Data not found. Checked: {img_root} and {ann_path}")
 
-    dataset = CocoKeypointsDataset(
+    dataset = CocoKeypointsDatasetAug(
         img_root=str(img_root),
         ann_path=str(ann_path),
         img_size=img_size,
         target_stride=target_stride,
         is_train=is_train,
-        aug_cfg=aug_cfg
+        aug_cfg=aug_cfg,
+        index_remap=index_remap
     )
 
-    # 组装 DataLoader kwargs
-    dl_kwargs: Dict[str, Any] = dict(
+    return DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         shuffle=is_train,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        drop_last=is_train,
+        drop_last=is_train
     )
 
-    if num_workers > 0:
-        dl_kwargs.update(persistent_workers=bool(is_train))
-        dl_kwargs.update(prefetch_factor=2)
-        dl_kwargs.update(worker_init_fn=lambda wid: np.random.seed(torch.initial_seed() % 2**32))
-    
-    return DataLoader(**dl_kwargs)
-
 # %% [markdown]
-# ## 测试：如何使用新的 Dataloader
+# ## 测试
 
 # %%
+
+# -----------------------------
+# Quick test / visualization
+# -----------------------------
 if __name__ == "__main__":
-    # 假设你的 COCO 数据集在 './coco' 目录下
-    # 你需要下载 COCO 2017 train/val images and annotations
-    DATASET_ROOT = "/home/user/projects/MobileSparrow/data/coco2017_movenet" 
-    
-    if not os.path.exists(DATASET_ROOT):
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(f"!! 请将 COCO 2017 数据集解压到 '{DATASET_ROOT}' 目录下 !!")
-        print("!! 目录结构应为:                                        !!")
-        print("!!   ./coco/annotations/person_keypoints_train2017.json      !!")
-        print("!!   ./coco/annotations/person_keypoints_val2017.json        !!")
-        print("!!   ./coco/train2017/<很多图片>                       !!")
-        print("!!   ./coco/val2017/<很多图片>                         !!")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    else:
-        # 1. 定义增强配置
-        train_aug_config = {
-            "use_flip": True,
-            "use_color_aug": True,
-            "rotate_deg": 20.0,
-            "scale_range": (-0.3, 0.3), # 对应 0.7-1.3 的缩放
-        }
+    import matplotlib.pyplot as plt
 
-        # 2. 创建训练 Dataloader
-        train_loader = create_kpts_dataloader(
-            dataset_root=DATASET_ROOT,
-            img_size=192,
-            batch_size=4,
-            target_stride=4, # 注意 stride 应该和你的模型输出 stride 匹配
-            num_workers=2,
-            pin_memory=True,
-            aug_cfg=train_aug_config,
-            is_train=True
-        )
-        
-        # 3. 取一个批次的数据进行测试
-        print("--- Testing Dataloader ---")
-        
-        # --- 核心修正点在这里 ---
-        # 接收全部4个返回值
-        imgs, labels, kps_masks, paths = next(iter(train_loader))
+    ROOT = "/home/user/projects/MobileSparrow/data/coco2017_movenet"  # 预处理输出根
+    IMG_SIZE = 192
+    STRIDE   = 4
+    BATCH    = 4
 
-        # --- 更新 print 语句以匹配新的输出格式 ---
-        print(f"Images batch shape: {imgs.shape}")
-        print(f"Images tensor dtype: {imgs.dtype}")
-        print(f"Images tensor value range: [{imgs.min():.2f}, {imgs.max():.2f}] (已归一化)")
-        
-        # labels 是一个 [B, 86, Hf, Wf] 的张量, 而不是列表
-        print(f"Labels batch shape: {labels.shape}")
-        
-        # kps_masks 是一个 [B, 17] 的张量
-        print(f"Keypoint masks batch shape: {kps_masks.shape}")
+    aug_cfg = {
+        "p_flip": 0.5,
+        "scale_min": -0.25,       # => 0.75x
+        "scale_max":  0.25,       # => 1.25x
+        "translate":  0.08,       # 8% 平移
+        "rotate":     30.0,
+        "color":      True,
+        "p_color":    0.8,
+    }
 
-        print(f"Paths is a list of {len(paths)} strings. First path: {paths[0]}")
-        
-        print("\n Dataloader test successful!")
+    loader = create_kpts_dataloader_aug(
+        dataset_root=ROOT,
+        img_size=IMG_SIZE,
+        batch_size=BATCH,
+        target_stride=STRIDE,
+        num_workers=0,
+        pin_memory=True,
+        is_train=True,
+        aug_cfg=aug_cfg,
+        # 若历史上 2/3 有对调，打开下面这行：
+        # index_remap=[0,1,3,2,4,5,6,7,8,9,10,11,12,13,14,15,16],
+    )
+
+    imgs, labels, kps_masks, paths = next(iter(loader))
+    print(f"imgs: {imgs.shape}  labels: {labels.shape}  kps_masks: {kps_masks.shape}")
+
+    # 可视化
+    MEAN = np.array([0.485, 0.456, 0.406])
+    STD  = np.array([0.229, 0.224, 0.225])
+    NUM_JOINTS = 17
+
+    n = min(BATCH, 4)
+    fig, axes = plt.subplots(n, 2, figsize=(10, 5*n))
+    if n == 1:
+        axes = np.array([axes])
+
+    for i in range(n):
+        img_np = imgs[i].numpy().transpose(1, 2, 0)
+        img_np = (img_np * STD + MEAN).clip(0, 1)
+
+        label_np = labels[i].numpy()
+        heatmaps = label_np[:NUM_JOINTS]
+        offsets  = label_np[NUM_JOINTS:]
+        kps_mask = kps_masks[i].numpy()
+
+        ax0 = axes[i, 0]; ax1 = axes[i, 1]
+        ax0.imshow(img_np); ax0.axis("off"); ax0.set_title(f"Sample {i}: Image + Kpts")
+
+        for j in range(NUM_JOINTS):
+            if kps_mask[j] > 0:
+                hm = heatmaps[j]
+                gy, gx = np.unravel_index(np.argmax(hm), hm.shape)
+                off_x, off_y = offsets[2*j, gy, gx], offsets[2*j+1, gy, gx]
+                px = (gx + off_x) * STRIDE
+                py = (gy + off_y) * STRIDE
+                ax0.scatter(px, py, s=20, c='lime', edgecolors='k', linewidths=0.5)
+
+        ax1.imshow(np.max(heatmaps, axis=0), cmap='viridis'); ax1.axis("off"); ax1.set_title("Target Heatmap")
+
+    plt.tight_layout(); plt.show()
 
 
