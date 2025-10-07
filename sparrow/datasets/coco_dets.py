@@ -1,33 +1,16 @@
 # -*- coding: utf-8 -*-
-"""
-COCO Detection DataLoader for SSDLite/RetinaNet-style training
-
-✓ 读取 COCO instances_*.json
-✓ Albumentations 几何/颜色增强（可控，严格参数校验）
-✓ 无形变 letterbox：最长边等比缩放 + pad 到 (img_size, img_size)
-✓ 输出:
-    images : FloatTensor [B, 3, img_size, img_size] (归一化)
-    targets: List[FloatTensor]，每个 [Ni, 5] = [cls, x1, y1, x2, y2] (像素)
-    paths  : List[str]
-
-备注：
-- bbox 坐标始终为像素 xyxy（和 anchors、loss 对齐最稳妥）
-- 忽略 crowd、无效面积与过小框（可配置）
-"""
-
 import json
 import os
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
 from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, Tuple
 
+import albumentations as A
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-
-import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from torch.utils.data import Dataset, DataLoader
 
 
 # -----------------------------
@@ -340,66 +323,3 @@ def create_coco_ssd_dataloader(
     )
     return loader
 
-
-# -----------------------------
-# Quick test / visualization
-# -----------------------------
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-
-    ROOT = "/home/user/projects/MobileSparrow/data/coco2017_ssdlite"  # 改成你的 COCO 根
-    IMG_SIZE = 320
-    BATCH = 4
-
-    aug = {
-        "p_flip": 0.5,
-        "scale": (0.8, 1.2),
-        "rotate": 10.0,
-        "translate": 0.08,
-        "shear": 0.0,
-        "color": True,
-        "p_color": 0.8,
-    }
-
-    loader = create_coco_ssd_dataloader(
-        dataset_root=ROOT,
-        img_size=IMG_SIZE,
-        batch_size=BATCH,
-        is_train=True,
-        num_workers=0,
-        pin_memory=True,
-        aug_cfg=aug,
-        split="train2017",
-    )
-
-    imgs, targets, paths = next(iter(loader))
-    print("imgs:", imgs.shape, "batch targets lens:", [t.shape for t in targets])
-
-    # 可视化第一张
-    MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
-    img0 = imgs[0].numpy().transpose(1, 2, 0)
-    img0 = (img0 * STD + MEAN).clip(0, 1)
-    img0 = (img0 * 255).astype(np.uint8)
-
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-    ax.imshow(img0)
-    ax.set_axis_off()
-    if len(targets[0]) > 0:
-        for c, x1, y1, x2, y2 in targets[0].numpy():
-            ax.add_patch(
-                plt.Rectangle(
-                    (x1, y1), x2 - x1, y2 - y1, fill=False, lw=1.5, edgecolor="lime"
-                )
-            )
-            ax.text(
-                x1,
-                y1 - 2,
-                f"{int(c)}",
-                color="yellow",
-                fontsize=7,
-                bbox=dict(facecolor="black", alpha=0.4, pad=1.0),
-            )
-    plt.tight_layout()
-    plt.show()

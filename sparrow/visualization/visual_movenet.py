@@ -147,7 +147,7 @@ if __name__ == '__main__':
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     INPUT_SIZE = 192
     STRIDE = 4
-    TEST_IMAGE_PATH = "../../res/girl_with_bags.png" # 请确保路径正确
+    TEST_IMAGE_PATH = "../../res/girl_with_bags.png"  # 请确保路径正确
     
     # 3. 加载模型 (这里仅为演示，不加载预训练权重)
     import timm
