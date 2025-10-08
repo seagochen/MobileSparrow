@@ -221,7 +221,7 @@ class CocoKeypointsDatasetAug(Dataset):
         return img_t, torch.from_numpy(label).float(), torch.from_numpy(kps_mask).float(), img_path
 
 
-def create_kpts_dataloader_aug(
+def create_kpts_dataloader(
         dataset_root: str,
         img_size: int,
         batch_size: int,

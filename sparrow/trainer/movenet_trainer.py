@@ -8,7 +8,7 @@ import torch
 from torch import nn, autocast
 from tqdm import tqdm
 
-from sparrow.datasets.coco_kpts import create_kpts_dataloader_aug
+from sparrow.datasets.coco_kpts import create_kpts_dataloader
 from sparrow.losses.movenet_loss import MoveNet2HeadLoss
 from sparrow.models.movenet_fpn import MoveNet_FPN
 from sparrow.trainer.base_trainer import BaseTrainer
@@ -108,7 +108,7 @@ class MoveNetTrainer(BaseTrainer):
         }
 
         # 加载 COCO train
-        train_loader = create_kpts_dataloader_aug(
+        train_loader = create_kpts_dataloader(
             dataset_root=self.cfg.get("data_dir", "/home/user/datasets/coco2017_movenet_sp"),
             img_size=self.cfg.get("img_size", 192),
             batch_size=self.cfg.get("batch_size", 64),
@@ -120,7 +120,7 @@ class MoveNetTrainer(BaseTrainer):
         )
 
         #  加载 COCO validation
-        val_loader = create_kpts_dataloader_aug(
+        val_loader = create_kpts_dataloader(
             dataset_root=self.cfg.get("data_dir", "/home/user/datasets/coco2017_movenet_sp"),
             img_size=self.cfg.get("img_size", 192),
             batch_size=self.cfg.get("batch_size", 64),
@@ -186,7 +186,11 @@ class MoveNetTrainer(BaseTrainer):
                                      f"or set Cfg.stride=8 to match stride-8 outputs.")
 
                 # 计算损失（返回总损失和各项分损失）
-                loss, logs = self.loss_fn(preds, labels, kps_masks)
+                loss, details = self.loss_fn(
+                    preds["heatmaps"],
+                    preds["offsets"],
+                    labels,
+                    kps_masks)
 
             # 4.4 反向传播（使用梯度缩放）
             # 原因：float16 计算时梯度可能下溢，需要缩放
@@ -206,9 +210,9 @@ class MoveNetTrainer(BaseTrainer):
             scaler.update()
 
             # 4.7 累加损失
-            running["total"] += loss.item()
-            running["hm"]    += logs["loss_heatmap"].item()
-            running["off"]   += logs["loss_offsets"].item()
+            running["total"] += loss.detach().item()
+            running["hm"]    += details["loss_heatmap"].item()
+            running["off"]   += details["loss_offsets"].item()
             count += 1
 
             # 4.8 更新进度条显示, 显示当前平均损失和学习率
@@ -270,12 +274,16 @@ class MoveNetTrainer(BaseTrainer):
                                      f"or set Cfg.stride=8 to match stride-8 outputs.")
 
                 # 计算损失（返回总损失和各项分损失）
-                loss, logs = self.loss_fn(preds, labels, kps_masks)
+                loss, details = self.loss_fn(
+                    preds["heatmaps"],
+                    preds["offsets"],
+                    labels,
+                    kps_masks)
 
             # 4.3. 累加损失
-            running["total"] += loss.item()
-            running["hm"] += logs["loss_heatmap"].item()
-            running["off"] += logs["loss_offsets"].item()
+            running["total"] += loss.detach().item()
+            running["hm"] += details["loss_heatmap"].item()
+            running["off"] += details["loss_offsets"].item()
 
         # 5. 计算平均损失，并返回
         n_batches = len(loader)
@@ -295,11 +303,11 @@ class MoveNetTrainer(BaseTrainer):
                 optimizer=self.optimizer,
                 scaler=self.scaler,
                 device=self.device)
-            logger.info("Sparrow", "Continue 6DRepNet from previous checkpoint.")
+            logger.info("Sparrow", "Continue MoveNet from previous checkpoint.")
         else:
             start_epoch = 0
             best_val = float("inf")
-            logger.info("Sparrow", "Training the 6DRepNet from beginning.")
+            logger.info("Sparrow", "Training MoveNet from beginning.")
 
         # Training logs to plot
         hist = dict(train=[], val=[])

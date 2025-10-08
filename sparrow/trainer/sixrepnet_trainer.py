@@ -127,11 +127,16 @@ class SixDRepNetTrainer(BaseTrainer):
         }
         count = 0  # 已处理的 batch 数量
 
-        # 3. 创建进度条（不保留到屏幕，避免多 epoch 时刷屏）
-        pbar = tqdm(loader, desc="Train", leave=False)
+        # 3. 创建进度条
+        pbar = tqdm(loader, desc="Valid", leave=False)
+
+        # 3. 创建进度条
+        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
+                    desc=f"Epoch {epoch:03d}/{self.epochs}")
 
         # 4. 遍历所有训练批次
-        for it, batch in enumerate(pbar, 1):  # it 从 1 开始计数
+        for step, batch in pbar:
+
             # 4.1 加载数据到设备
             # non_blocking=True: 异步传输，提高 GPU 利用率
             imgs = batch["image"].to(device, non_blocking=True)  # [B, 3, H, W]
@@ -151,13 +156,11 @@ class SixDRepNetTrainer(BaseTrainer):
                 R_pred = model.compute_rotation_matrix_from_orthod(pred_6d)  # [B, 3, 3]
 
                 # 计算损失（返回总损失和各项分损失）
-                total, parts = loss_fn(R_pred, pred_6d, R_gt)
-                # total: 标量总损失
-                # parts: 字典 {'total_loss', 'geodesic_loss', 'column_loss', 'regularizer_loss'}
+                loss, details = loss_fn(R_pred, pred_6d, R_gt)
 
             # 4.4 反向传播（使用梯度缩放）
             # 原因：float16 计算时梯度可能下溢，需要缩放
-            scaler.scale(total).backward()
+            scaler.scale(loss).backward()
 
             # 4.5 梯度裁剪（防止梯度爆炸）
             if self.use_clip_grad:
@@ -173,10 +176,10 @@ class SixDRepNetTrainer(BaseTrainer):
             scaler.update()
 
             # 4.7 累加损失（用于计算平均）
-            running["total"] += float(parts["total_loss"].item())
-            running["geo"] += float(parts["geodesic_loss"].item())
-            running["col"] += float(parts["column_loss"].item())
-            running["reg"] += float(parts["regularizer_loss"].item())
+            running["total"] += loss.detach().item()
+            running["geo"] += details["geodesic_loss"].item()
+            running["col"] += details["column_loss"].item()
+            running["reg"] += details["regularizer_loss"].item()
             count += 1
 
             # 4.8 更新进度条显示, 显示当前平均损失和学习率
@@ -242,10 +245,12 @@ class SixDRepNetTrainer(BaseTrainer):
         agg_deg = []  # 存储每个样本的角度误差（用于计算统计量）
 
         # 3. 创建进度条
-        pbar = tqdm(loader, desc="Valid", leave=False)
+        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
+                    desc="Valid")
 
         # 4. 遍历验证集（无需梯度）
-        for batch in pbar:
+        for step,batch in pbar:
+
             # 4.1 加载数据
             imgs = batch["image"].to(device, non_blocking=True)
             R_gt = batch["R_gt"].to(device, non_blocking=True)
@@ -257,13 +262,13 @@ class SixDRepNetTrainer(BaseTrainer):
                 R_pred = model.compute_rotation_matrix_from_orthod(pred_6d)
 
                 # 计算损失
-                total, parts = loss_fn(R_pred, pred_6d, R_gt)
+                loss, details = loss_fn(R_pred, pred_6d, R_gt)
 
             # 4.3 累加损失
-            agg_loss["total"] += float(parts["total_loss"].item())
-            agg_loss["geo"] += float(parts["geodesic_loss"].item())
-            agg_loss["col"] += float(parts["column_loss"].item())
-            agg_loss["reg"] += float(parts["regularizer_loss"].item())
+            agg_loss["total"] += loss.detach().item()
+            agg_loss["geo"] += details["geodesic_loss"].item()
+            agg_loss["col"] += details["column_loss"].item()
+            agg_loss["reg"] += details["regularizer_loss"].item()
 
             # 4.4 计算角度误差（每个样本的测地角度，单位：度）
             deg = self.geodesic_deg(R_pred, R_gt)  # [B] - 每个样本的误差
@@ -302,7 +307,7 @@ class SixDRepNetTrainer(BaseTrainer):
         else:
             start_epoch = 0
             best_val = float("inf")
-            logger.info("Sparrow", "Training the 6DRepNet from beginning.")
+            logger.info("Sparrow", "Training 6DRepNet from beginning.")
 
         # Training logs to plot
         hist = dict(train=[], val=[], deg_mean=[], deg_median=[])

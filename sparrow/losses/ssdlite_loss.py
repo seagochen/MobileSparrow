@@ -283,4 +283,9 @@ class SSDLoss(nn.Module):
         # beta=1/9 是 Faster R-CNN/RetinaNet 的常用设置
         loss_reg = F.smooth_l1_loss(reg_pred_pos, target_deltas, beta=1 / 9, reduction="sum") / num_pos
 
-        return loss_cls, loss_reg
+        # 10. 返回总损失和详细信息（detach 避免影响梯度）
+        total_loss = loss_cls + loss_reg
+        return total_loss, {
+            "cls_loss": loss_cls.detach(),
+            "reg_loss": loss_reg.detach()
+        }

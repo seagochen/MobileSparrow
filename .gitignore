@@ -26,3 +26,6 @@ data/reid/
 
 # Ignore other files
 data/cropped/
+
+# Ignore the test file
+test.py

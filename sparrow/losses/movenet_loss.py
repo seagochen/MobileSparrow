@@ -96,16 +96,16 @@ class MoveNet2HeadLoss(nn.Module):
         self.l1sum = nn.L1Loss(reduction="sum")  # 使用 sum 归约，后续手动归一化
 
     def forward(self,
-                preds: Dict[str, torch.Tensor],
+                pred_hm: torch.Tensor, # [B,K,H,W] logits
+                pred_off: torch.Tensor, # [B,2K,H,W]
                 labels: torch.Tensor,  # [B, K+2K, H, W]
                 kps_masks: torch.Tensor):  # [B, K]
         """
         前向传播计算总损失
 
         参数:
-          preds: 模型预测字典
-            - "heatmaps": [B,K,H,W] - 热图 logits
-            - "offsets": [B,2K,H,W] - 偏移量（每个关键点的 x,y 偏移）
+          pred_hm: [B,K,H,W] - 热图 logits
+          pred_off: [B,2K,H,W] - 偏移量（每个关键点的 x,y 偏移）
           labels: 标签张量 [B, K+2K, H, W]
             - 前 K 个通道：热图标签（高斯分布）
             - 后 2K 个通道：偏移量标签（x,y 交替排列）
@@ -119,10 +119,6 @@ class MoveNet2HeadLoss(nn.Module):
         """
         B = labels.shape[0]
         K = self.K
-
-        # 1. 解包预测和标签
-        pred_hm = preds["heatmaps"]  # [B,K,H,W] logits
-        pred_off = preds["offsets"]  # [B,2K,H,W]
 
         gt_hm = labels[:, :K]  # [B,K,H,W] - 热图标签
         gt_off = labels[:, K:]  # [B,2K,H,W] - 偏移标签
@@ -151,7 +147,6 @@ class MoveNet2HeadLoss(nn.Module):
 
         # 5. 返回总损失和详细信息（detach 避免影响梯度）
         return total, {
-            "total_loss": total.detach(),
             "loss_heatmap": loss_hm.detach(),
             "loss_offsets": loss_off.detach(),
         }

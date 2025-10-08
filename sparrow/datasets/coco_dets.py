@@ -288,23 +288,26 @@ def create_coco_ssd_dataloader(
     is_train: bool,
     num_workers: int = 4,
     pin_memory: bool = True,
-    aug_cfg: Dict[str, Any] = None,
-    split: str = "train2017",  # or "val2017"
+    aug_cfg: Dict[str, Any] = None
 ) -> DataLoader:
     """
     dataset_root: 含 images/ 与 annotations/ 的根目录（标准 COCO 结构）
     split       : "train2017" 或 "val2017"
     自动匹配 annotations/instances_{split}.json
     """
-    root = Path(dataset_root)
-    img_root = root / "images" / split
-    if not img_root.is_dir():  # 兼容 images 不分子目录
-        img_root = root / split
-    ann_path = root / "annotations" / f"instances_{split}.json"
+    img_dir_name = "train2017" if is_train else "val2017"
+    ann_file_name = f"instances_{img_dir_name}.json"
+
+    root_path = Path(dataset_root)
+    img_root = root_path / "images" / img_dir_name
+    if not img_root.is_dir():
+        img_root = root_path / img_dir_name  # 兼容
+    ann_path = root_path / "annotations" / ann_file_name
+
     if not img_root.is_dir() or not ann_path.is_file():
         raise FileNotFoundError(f"Data not found. Checked: {img_root} and {ann_path}")
 
-    ds = CocoDetectionDataset(
+    dataset = CocoDetectionDataset(
         img_root=str(img_root),
         ann_path=str(ann_path),
         img_size=img_size,
@@ -312,8 +315,8 @@ def create_coco_ssd_dataloader(
         aug_cfg=aug_cfg,
     )
 
-    loader = DataLoader(
-        dataset=ds,
+    return DataLoader(
+        dataset=dataset,
         batch_size=batch_size,
         shuffle=is_train,
         num_workers=num_workers,
@@ -321,5 +324,4 @@ def create_coco_ssd_dataloader(
         drop_last=is_train,
         collate_fn=collate_detection,
     )
-    return loader
 

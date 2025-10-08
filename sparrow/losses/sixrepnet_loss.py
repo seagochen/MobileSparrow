@@ -273,11 +273,9 @@ class SixDCombinedLoss(nn.Module):
                       self.w_col * loss_col +
                       self.w_reg * loss_reg)
 
-        loss_dict = {
-            "total_loss": total_loss,
-            "geodesic_loss": loss_geo,
-            "column_loss": loss_col,
-            "regularizer_loss": loss_reg
+        # 返回总损失和详细信息（detach 避免影响梯度）
+        return total_loss, {
+            "geodesic_loss": loss_geo.detach(),
+            "column_loss": loss_col.detach(),
+            "regularizer_loss": loss_reg.detach()
         }
-
-        return total_loss, loss_dict
