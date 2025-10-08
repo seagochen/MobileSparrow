@@ -15,3 +15,6 @@ nvitop
 pycocotools
 pyyaml
 kagglehub
+matplotlib
+tqdm
+timm

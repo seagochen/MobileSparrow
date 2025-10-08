@@ -8,6 +8,10 @@ __pycache__
 /sparrow/__pycache__
 output/
 output*/
+runs/
+
+# Ignore the obsoleted
+obsoleted
 
 # Ignore the idea and vscode
 .idea/
@@ -22,3 +26,6 @@ data/reid/
 
 # Ignore other files
 data/cropped/
+
+# Ignore the test file
+test.py
