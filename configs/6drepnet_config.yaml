@@ -1,0 +1,125 @@
+# ==============================
+# SixDRepNet 训练配置（BIWI）
+# ==============================
+
+# ---------- 基础 ----------
+experiment_name: "biwi_sixd_mbv3"     # 方便日志/存档命名（可选）
+seed: 42                              # 训练随机种子
+resume: false                         # 是否从 save_dir/last.pt 续训
+
+# ---------- 路径 ----------
+data_dir: "/home/user/datasets/biwi"  # BIWI 数据集根目录（你的代码里会用到）
+save_dir: "runs/biwi_sixd_mbv3"       # 训练输出目录（ckpt/曲线图）
+
+# ---------- 模型 ----------
+backbone: "mobilenetv3_large_100"     # timm 的骨干网络名称
+# 注：SixDRepNet 会用 timm.create_model(backbone, pretrained=True, num_classes=0)
+
+# ---------- 损失权重 ----------
+w_geo: 1.0    # geodesic（测地）损失权重
+w_col: 0.5    # 列向量对齐损失权重
+w_reg: 0.1    # 正则损失权重
+
+# ---------- 训练流程 ----------
+epochs: 100
+batch_size: 64
+workers: 8                         # DataLoader 的 num_workers
+# 注：create_dataloaders() 中 val 比例固定 10%，drop_last=True(训练)/False(验证)
+
+# ---------- AMP / EMA / 梯度裁剪 ----------
+use_amp: true                      # 是否启用混合精度（autocast + GradScaler）
+use_ema: true                      # 代码中用 use_ema 控制 autocast.enabled，命名有点“反直觉”，但保持一致
+ema_decay: 0.9998                  # 若你的 BaseTrainer 内部实现了 EMA，会使用
+use_clip_grad: true                # 是否开启梯度裁剪
+clip_grad_norm: 1.0                # 全局梯度范数裁剪阈值（0/None 表示不裁剪）
+
+# ---------- 优化器 ----------
+optimizer_name: "adamw"            # 可选：adamw/adam/sgd/rmsprop/adagrad/adadelta/adamax/nadam/radam/adamp/lamb
+lr: 3.0e-4
+weight_decay: 1.0e-4
+
+# （以下根据 optimizer_name 可选）
+# —— 对于 Adam/AdamW/Adamax/NAdam/RAdam/AdamP/LAMB：
+betas: [0.9, 0.999]
+eps: 1.0e-8
+amsgrad: false               # 仅 Adam/AdamW 支持
+
+# —— 对于 SGD/RMSprop/Adagrad/Adadelta：
+momentum: 0.9                # SGD/RMSprop
+nesterov: true               # SGD
+alpha: 0.99                  # RMSprop
+centered: false              # RMSprop
+lr_decay: 0.0                # Adagrad
+rho: 0.9                     # Adadelta
+
+# 提示：使用 adamp/lamb 需要安装相应包：
+# pip install adamp
+# pip install pytorch-lamb
+
+# ---------- 调度器 ----------
+scheduler_name: "cosine"     # 可选：step/multi_step/exp/cosine/sgdr/plateau/one_cycle/linear/poly/constant
+
+# —— 通用余弦/多项式/线性等的“总长度”通常用 epochs 控制 —— #
+
+# = CosineAnnealingLR（余弦退火）
+T_max: null      # 若留空，则内部用 epochs
+eta_min: 1.0e-6  # 余弦退火的最小学习率
+
+# = StepLR
+step_size: 30
+gamma: 0.1
+
+# = MultiStepLR
+milestones: [30, 60, 90]
+# gamma: 0.1    # 上面已给出，保持同一键
+
+# = ExponentialLR
+# gamma: 0.95   # 若使用 exp/exponential，可用这个
+
+# = ReduceLROnPlateau
+mode: "min"             # "min" 或 "max"
+factor: 0.5
+patience: 5
+threshold: 1.0e-4
+min_lr: 0.0
+verbose: false
+
+# = OneCycleLR（注意：必须 batch 级 step）
+max_lr: 5.0e-4
+steps_per_epoch: null    # 若为 null，请确保外部提供或自行计算
+pct_start: 0.3
+anneal_strategy: "cos"   # "cos" 或 "linear"
+div_factor: 25.0
+final_div_factor: 10000.0
+
+# = LinearLR
+start_factor: 1.0    # 线性起始比例（你在 super().__init__ 已用到）
+end_factor: 1.0      # 线性结束比例（你在 super().__init__ 已用到）
+total_iters: null    # 若为 null，则常用 epochs 填充
+
+# = PolynomialLR
+power: 2.0
+# total_iters: null   # 同上
+
+# = Constant（固定学习率）
+# 无额外参数
+
+# ---------- Warmup 组合 ----------
+use_warmup_scheduler: true  # 你在 super().__init__ 会读取
+warmup_epochs: 10
+# 默认把 LinearLR 作为 warmup（你在 super().__init__ 传入了 start_factor/end_factor）
+# 你的默认设置：start_factor = 1.0 / max(1, warmup_epochs)，end_factor = 1.0
+# 上面“LinearLR”小节里也暴露了同名参数，保持一致
+# 若你要实现“完全等价于 LambdaLR((epoch+1)/warmup_epochs)”的 warmup，
+# start_factor 建议设为 1.0 / warmup_epochs，end_factor=1.0
+
+# ---------- （可选）数据细节（当前代码中是硬编码，如需改动请同步改代码） ----------
+# img_size: 224
+# crop_size: 256
+# use_crop: true
+# return_path: false
+
+# ---------- 其他（透传给 BaseTrainer 的附加参数，可按需添加） ----------
+# log_interval: 50
+# save_interval: 1
+# grad_accum_steps: 1

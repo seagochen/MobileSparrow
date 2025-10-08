@@ -1,16 +1,4 @@
-# %% [markdown]
-# # COCO数据集Dataloader
-# 
-# COCO 17 keypoints DataLoader (preprocessed + strong aug)
-# 适用：使用 make_coco2017_for_movenet.py 生成的“单人方图”数据集
-# 功能：
-#  * 读取预处理后的图片 + JSON 坐标（不再做第二次裁剪）
-#  * Albumentations 几何增强：Flip / Affine(缩放、平移、旋转) —— 同步作用于关键点
-#  * 可选颜色增强
-#  * 统一 Resize 到 img_size，保证 batch 可堆叠
-#  * 稳健的标签编码：高斯+邻域offset
-
-# %%
+# -*- coding: utf-8 -*-
 import json
 import os
 from pathlib import Path
@@ -25,13 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-# %% [markdown]
-# ## 辅助工具
 
-# %% [markdown]
-# ### `draw_gaussian`
-
-# %%
 def draw_gaussian(heatmap: np.ndarray, center_xy: Tuple[float, float], radius: int):
     H, W = heatmap.shape
     cx, cy = float(center_xy[0]), float(center_xy[1])
@@ -52,10 +34,7 @@ def draw_gaussian(heatmap: np.ndarray, center_xy: Tuple[float, float], radius: i
     patch = heatmap[y0:y1 + 1, x0:x1 + 1]
     np.maximum(patch, G, out=patch)
 
-# %% [markdown]
-# ### `encode_single_targets`
 
-# %%
 def encode_single_targets(kps_xyv: np.ndarray, Hf: int, Wf: int, stride: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     (J, Hf, Wf) heatmaps, (2J, Hf, Wf) offsets, (J,) mask
@@ -99,10 +78,6 @@ def encode_single_targets(kps_xyv: np.ndarray, Hf: int, Wf: int, stride: int) ->
 
     return heatmaps, offsets, kps_mask
 
-# %% [markdown]
-# ### `recompute_visibility`
-
-# %%
 
 def recompute_visibility(kps_xyv: np.ndarray, w: int, h: int) -> np.ndarray:
     """增强后基于边界重算 visibility（原本 v>0 的点若出界则置 0）"""
@@ -113,12 +88,6 @@ def recompute_visibility(kps_xyv: np.ndarray, w: int, h: int) -> np.ndarray:
     return kps
 
 
-# %% [markdown]
-# ## Dataset
-# 
-# 预处理和数据增强
-
-# %%
 class CocoKeypointsDatasetAug(Dataset):
     def __init__(self,
                  img_root: str,
@@ -252,11 +221,7 @@ class CocoKeypointsDatasetAug(Dataset):
         return img_t, torch.from_numpy(label).float(), torch.from_numpy(kps_mask).float(), img_path
 
 
-# %% [markdown]
-# ## 工厂化方法
-
-# %%
-def create_kpts_dataloader_aug(
+def create_kpts_dataloader(
         dataset_root: str,
         img_size: int,
         batch_size: int,
@@ -300,82 +265,3 @@ def create_kpts_dataloader_aug(
         pin_memory=pin_memory,
         drop_last=is_train
     )
-
-# %% [markdown]
-# ## 测试
-
-# %%
-
-# -----------------------------
-# Quick test / visualization
-# -----------------------------
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-
-    ROOT = "/home/user/projects/MobileSparrow/data/coco2017_movenet"  # 预处理输出根
-    IMG_SIZE = 192
-    STRIDE   = 4
-    BATCH    = 4
-
-    aug_cfg = {
-        "p_flip": 0.5,
-        "scale_min": -0.25,       # => 0.75x
-        "scale_max":  0.25,       # => 1.25x
-        "translate":  0.08,       # 8% 平移
-        "rotate":     30.0,
-        "color":      True,
-        "p_color":    0.8,
-    }
-
-    loader = create_kpts_dataloader_aug(
-        dataset_root=ROOT,
-        img_size=IMG_SIZE,
-        batch_size=BATCH,
-        target_stride=STRIDE,
-        num_workers=0,
-        pin_memory=True,
-        is_train=True,
-        aug_cfg=aug_cfg,
-        # 若历史上 2/3 有对调，打开下面这行：
-        # index_remap=[0,1,3,2,4,5,6,7,8,9,10,11,12,13,14,15,16],
-    )
-
-    imgs, labels, kps_masks, paths = next(iter(loader))
-    print(f"imgs: {imgs.shape}  labels: {labels.shape}  kps_masks: {kps_masks.shape}")
-
-    # 可视化
-    MEAN = np.array([0.485, 0.456, 0.406])
-    STD  = np.array([0.229, 0.224, 0.225])
-    NUM_JOINTS = 17
-
-    n = min(BATCH, 4)
-    fig, axes = plt.subplots(n, 2, figsize=(10, 5*n))
-    if n == 1:
-        axes = np.array([axes])
-
-    for i in range(n):
-        img_np = imgs[i].numpy().transpose(1, 2, 0)
-        img_np = (img_np * STD + MEAN).clip(0, 1)
-
-        label_np = labels[i].numpy()
-        heatmaps = label_np[:NUM_JOINTS]
-        offsets  = label_np[NUM_JOINTS:]
-        kps_mask = kps_masks[i].numpy()
-
-        ax0 = axes[i, 0]; ax1 = axes[i, 1]
-        ax0.imshow(img_np); ax0.axis("off"); ax0.set_title(f"Sample {i}: Image + Kpts")
-
-        for j in range(NUM_JOINTS):
-            if kps_mask[j] > 0:
-                hm = heatmaps[j]
-                gy, gx = np.unravel_index(np.argmax(hm), hm.shape)
-                off_x, off_y = offsets[2*j, gy, gx], offsets[2*j+1, gy, gx]
-                px = (gx + off_x) * STRIDE
-                py = (gy + off_y) * STRIDE
-                ax0.scatter(px, py, s=20, c='lime', edgecolors='k', linewidths=0.5)
-
-        ax1.imshow(np.max(heatmaps, axis=0), cmap='viridis'); ax1.axis("off"); ax1.set_title("Target Heatmap")
-
-    plt.tight_layout(); plt.show()
-
-
