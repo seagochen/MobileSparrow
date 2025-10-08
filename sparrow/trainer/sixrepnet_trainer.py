@@ -38,7 +38,7 @@ class SixDRepNetTrainer(BaseTrainer):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # --- Loss ---
-        self.loss_fn = SixDCombinedLoss(
+        loss_fn = SixDCombinedLoss(
             w_geo=cfg.get("w_geo", 1.0),
             w_col=cfg.get("w_col", 0.5),
             w_reg=cfg.get("w_reg", 0.1)
@@ -47,6 +47,7 @@ class SixDRepNetTrainer(BaseTrainer):
         # --- 初始化 super ---
         super().__init__(
             model,
+            loss_fn,
             data_dir=cfg.get("data_dir", "/home/user/datasets/biwi"),
             save_dir=cfg.get("save_dir", "runs/biwi_sixd_mbv3"),
             device=device,
@@ -107,40 +108,12 @@ class SixDRepNetTrainer(BaseTrainer):
     def train_one_epoch(self,
             model: nn.Module,
             loss_fn: nn.Module,
+            epoch: int,
             loader: torch.utils.data.DataLoader,
             optimizer: torch.optim.Optimizer,
             scaler: torch.amp.GradScaler,
             device: torch.device) -> Dict[str, float]:
-        """
-        训练一个 epoch（头部姿态估计任务）
 
-        功能：
-          完成一个完整的训练周期，包括前向传播、损失计算、反向传播和参数更新
-
-        流程：
-          1. 遍历数据集的所有批次
-          2. 前向传播：图像 -> 6D 向量 -> 旋转矩阵
-          3. 计算组合损失（测地距离 + 列向量对齐 + 正则化）
-          4. 反向传播并更新参数
-          5. 记录并返回平均损失
-
-        参数:
-          model: 训练模型（如 SixDRepNet）
-          loss_fn: 损失函数（返回总损失和各项分损失）
-          loader: 训练数据加载器
-          optimizer: 优化器（如 Adam, SGD）
-          scaler: 混合精度训练的梯度缩放器（GradScaler）
-          device: 设备（'cuda' 或 'cpu'）
-
-        返回:
-          字典包含本 epoch 的平均损失：
-            {
-                'total': 总损失,
-                'geo': 测地距离损失,
-                'col': 列向量对齐损失,
-                'reg': 正则化损失
-            }
-        """
         # 1. 设置模型为训练模式
         # 效果：启用 Dropout, BatchNorm 使用 batch 统计
         model.train()
@@ -224,6 +197,7 @@ class SixDRepNetTrainer(BaseTrainer):
     def evaluate(self,
                  model: nn.Module,
                  loss_fn: nn.Module,
+                 epoch: int,
                  loader: torch.utils.data.DataLoader,
                  device: torch.device) -> tuple[Dict[str, float], Dict[str, float]]:
         """
@@ -340,6 +314,7 @@ class SixDRepNetTrainer(BaseTrainer):
             tr = self.train_one_epoch(
                 model=self.model,
                 loss_fn=self.loss_fn,
+                epoch=epoch,
                 loader=self.train_dl,
                 optimizer=self.optimizer,
                 scaler=self.scaler,
@@ -352,6 +327,7 @@ class SixDRepNetTrainer(BaseTrainer):
             val_loss, val_metrics = self.evaluate(
                 model=self.model,
                 loss_fn=self.loss_fn,
+                epoch=epoch,
                 loader=self.val_dl,
                 device=self.device)
 

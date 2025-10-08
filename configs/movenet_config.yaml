@@ -1,0 +1,129 @@
+# ==============================
+# MoveNet_FPN 训练配置（COCO 关键点）
+# ==============================
+
+# ---------- 运行控制 ----------
+experiment_name: "movenet_fpn_mbv3"     # 方便日志/存档命名（可选）
+seed: 45                                 # 训练随机种子（你的 dataloader 默认用 45）
+resume: false                            # 是否从 save_dir/last.pt 续训
+
+# ---------- 路径 ----------
+data_dir: "/home/user/datasets/coco2017_movenet_sp"  # 数据集根目录（你的代码会读）
+save_dir: "runs/movenet_fpn_mbv3"                    # 输出目录（ckpt/曲线图/日志）
+
+# ---------- 模型 ----------
+backbone: "mobilenetv3_large_100" # timm backbone 名称（features_only=True, out_indices=(2,3,4)）
+num_joints: 17                    # 关键点数量（COCO=17）
+fpn_out_channels: 128             # FPN 输出通道
+head_midc: 32                     # 头部中间通道
+upsample_to_quarter: true         # True：输出上采样到 1/4 分辨率（适配 stride=4 标签）
+
+# ---------- 输入与数据加载 ----------
+img_size: 192          # 输入尺寸（你的 create_kpts_dataloader_aug() 在用）
+stride: 4               # 标签/特征步长（4 或 8；与 upsample_to_quarter 逻辑相关）
+batch_size: 64
+num_workers: 4          # DataLoader 的 worker 数
+pin_memory: true
+
+# ---------- 数据增强（train 使用 aug_cfg；val 使用 non_aug 固定禁用增强） ----------
+aug_cfg:
+  p_flip: 0.5           # 左右翻转概率
+  scale_min: -0.25      # 缩放下限（相对）
+  scale_max: 0.25       # 缩放上限（相对）
+  translate: 0.08       # 平移幅度（相对）
+  rotate: 30.0          # 旋转角度上限（度）
+  color: true           # 是否启用颜色扰动
+  p_color: 0.8          # 颜色扰动概率
+
+# ---------- 损失 ----------
+hm_weight: 1.0          # 热图损失权重
+off_weight: 1.0         # 偏移损失权重
+focal_alpha: 2.0        # Focal alpha
+focal_beta: 4.0         # Focal beta
+
+# ---------- 训练流程 ----------
+epochs: 100
+
+# ---------- AMP / EMA / 梯度裁剪 ----------
+use_amp: true                # 是否启用混合精度（注意：代码里把 enabled=self.use_ema，变量名有点反直觉）
+use_ema: true                # 你的 autocast(enabled=self.use_ema) 用这个开关
+ema_decay: 0.9998            # 如果 BaseTrainer 里实现了 EMA，会用
+use_clip_grad: true          # 是否开启梯度裁剪
+clip_grad_norm: 1.0          # 全局梯度范数阈值（0 或小于等于 0 表示不裁剪）
+
+# ---------- 优化器 ----------
+optimizer_name: "adamw"      # 可选：adamw/adam/sgd/rmsprop/adagrad/adadelta/adamax/nadam/radam/adamp/lamb
+lr: 3.0e-4
+weight_decay: 1.0e-4
+
+# （以下为不同优化器的可选超参；只有在对应 optimizer_name 下才起作用）
+# —— 对于 Adam 系列（adam/adamw/adamax/nadam/radam/adamp/lamb）
+betas: [0.9, 0.999]
+eps: 1.0e-8
+amsgrad: false               # 仅 Adam/AdamW 支持
+
+# —— 对于 SGD / RMSprop / Adagrad / Adadelta
+momentum: 0.9                # SGD/RMSprop
+nesterov: true               # SGD
+alpha: 0.99                  # RMSprop
+centered: false              # RMSprop
+lr_decay: 0.0                # Adagrad
+rho: 0.9                     # Adadelta
+
+# 提示：adamp/lamb 需要安装：
+#   pip install adamp
+#   pip install pytorch-lamb
+
+# ---------- 调度器 ----------
+scheduler_name: "cosine"     # 可选：step/multi_step/exp/cosine/sgdr/plateau/one_cycle/linear/poly/constant
+
+# = CosineAnnealingLR（余弦退火）
+T_max: null      # 留空则用 epochs
+eta_min: 1.0e-6  # 最小学习率
+
+# = StepLR
+step_size: 30
+gamma: 0.1
+
+# = MultiStepLR
+milestones: [30, 60, 90]
+# gamma: 0.1    # 上面已定义；保持同键
+
+# = ExponentialLR
+# gamma: 0.95   # 若选 exp/exponential，可启用
+
+# = ReduceLROnPlateau
+mode: "min"             # "min" 或 "max"
+factor: 0.5
+patience: 5
+threshold: 1.0e-4
+min_lr: 0.0
+verbose: false
+
+# = OneCycleLR（注意：必须 batch 级 step；当前 train_model() 是 epoch 级 step，不建议直接用）
+max_lr: 5.0e-4
+steps_per_epoch: null    # 若用 one_cycle，需提供（或在代码中计算）
+pct_start: 0.3
+anneal_strategy: "cos"   # "cos" 或 "linear"
+div_factor: 25.0
+final_div_factor: 10000.0
+
+# = LinearLR（你在 super().__init__ 用到了 start_factor/end_factor）
+start_factor: 1.0        # 线性起始比例
+end_factor: 1.0          # 线性结束比例
+total_iters: null        # 若为空，通常用 epochs 代替
+
+# = PolynomialLR
+power: 2.0
+# total_iters: null
+
+# = Constant（固定学习率）
+# 无额外参数
+
+# ---------- Warmup 组合 ----------
+use_warmup_scheduler: true  # super().__init__ 会读取它来创建 Warmup+主调度器
+warmup_epochs: 10
+# 你的默认：start_factor = 1.0 / max(1, warmup_epochs)，end_factor = 1.0
+# 若希望与 `(epoch+1)/warmup_epochs` 完全等价，建议设：
+# start_factor: 1.0 / 10    # 示例：warmup_epochs=10
+# end_factor: 1.0

@@ -13,6 +13,7 @@ class BaseTrainer:
 
     def __init__(self,
                  model: nn.Module,
+                 loss_fn: nn.Module,
                  *, data_dir: str,
                  save_dir: Optional[str] = None,
                  device: Optional[torch.device] = None,
@@ -42,6 +43,7 @@ class BaseTrainer:
 
         # --- 核心组件 ---
         self.model = model.to(device)
+        self.loss_fn = loss_fn.to(device)
         self.device = device
         self.epochs = epochs
         self.save_dir = save_dir
@@ -81,6 +83,7 @@ class BaseTrainer:
     def train_one_epoch(self,
                         model: nn.Module,
                         loss_fn: nn.Module,
+                        epoch: int,
                         loader: torch.utils.data.DataLoader,
                         optimizer: torch.optim.Optimizer,
                         scaler: torch.amp.GradScaler,
@@ -94,6 +97,7 @@ class BaseTrainer:
     def evaluate(self,
                  model: nn.Module,
                  loss_fn: nn.Module,
+                 epoch: int,
                  loader: torch.utils.data.DataLoader,
                  device: torch.device):
         raise NotImplemented
