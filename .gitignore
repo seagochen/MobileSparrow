@@ -8,6 +8,7 @@ __pycache__
 /sparrow/__pycache__
 output/
 output*/
+runs/
 
 # Ignore the obsoleted
 obsoleted
