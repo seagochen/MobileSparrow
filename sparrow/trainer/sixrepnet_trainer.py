@@ -128,9 +128,6 @@ class SixDRepNetTrainer(BaseTrainer):
         count = 0  # 已处理的 batch 数量
 
         # 3. 创建进度条
-        pbar = tqdm(loader, desc="Valid", leave=False)
-
-        # 3. 创建进度条
         pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
                     desc=f"Epoch {epoch:03d}/{self.epochs}")
 
@@ -249,7 +246,7 @@ class SixDRepNetTrainer(BaseTrainer):
                     desc="Valid")
 
         # 4. 遍历验证集（无需梯度）
-        for step,batch in pbar:
+        for step, batch in pbar:
 
             # 4.1 加载数据
             imgs = batch["image"].to(device, non_blocking=True)

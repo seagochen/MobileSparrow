@@ -1,0 +1,124 @@
+# ==============================
+# SSDLite_FPN 训练配置（COCO 检测）
+# ==============================
+
+# ---------- 运行控制 ----------
+experiment_name: "ssdlite_fpn_mbv3"     # 方便日志/存档命名（可选）
+seed: 45                                 # 训练随机种子（create_dataloaders 默认 45）
+resume: false                            # 是否从 save_dir/last.pt 续训
+
+# ---------- 路径 ----------
+data_dir: "/home/user/datasets/coco2017_ssdlite"  # 数据集根目录（你的代码会读）
+save_dir: "runs/ssdlite_fpn_mbv3"                 # 输出目录（ckpt/曲线图/日志）
+
+# ---------- 模型 ----------
+backbone: "mobilenetv3_large_100" # timm backbone（features_only=True, out_indices=(2,3,4)）
+num_classes: 80                   # COCO=80
+fpn_out_channels: 128             # FPN 输出通道
+img_size: 320                     # 训练/验证输入尺寸（同时传给 dataloader 与模型）
+
+# ---------- 输入与数据加载 ----------
+batch_size: 64
+num_workers: 4
+pin_memory: true
+
+# ---------- 数据增强 ----------
+# 训练集使用 aug_cfg；验证集使用 non-aug（在代码中固定：无色彩/平移/旋转/缩放）
+aug_cfg:
+  p_flip: 0.5            # 左右翻转概率
+  scale: [0.8, 1.2]      # 随机缩放范围（最小, 最大）
+  rotate: 10.0           # 最大旋转角（度）
+  translate: 0.08        # 平移幅度（相对）
+  color: true            # 是否使用颜色扰动
+  p_color: 0.8           # 颜色扰动概率
+
+# ---------- 损失 ----------
+iou_pos: 0.45            # 正样本 IoU 阈值
+iou_neg: 0.30            # 负样本 IoU 阈值
+focal_alpha: 0.25        # 焦点损失 alpha（分类头）
+debug_assign: false      # 调试匹配（正/负样本分配）信息
+
+# ---------- 训练流程 ----------
+epochs: 100
+
+# ---------- AMP / EMA / 梯度裁剪 ----------
+use_amp: true                # 是否启用混合精度（注意：代码里 autocast(enabled=self.use_ema) —— 名字有点反直觉）
+use_ema: true                # 目前被用于 autocast 的开关；若想严格控制 AMP，建议在代码中改为 enabled=self.use_amp
+ema_decay: 0.9998            # 若 BaseTrainer 实现了 EMA，会使用
+use_clip_grad: true          # 是否开启梯度裁剪
+clip_grad_norm: 1.0          # 全局梯度范数阈值（<=0 表示不裁剪）
+
+# ---------- 优化器 ----------
+optimizer_name: "adamw"      # 可选：adamw/adam/sgd/rmsprop/adagrad/adadelta/adamax/nadam/radam/adamp/lamb
+lr: 3.0e-4
+weight_decay: 1.0e-4
+
+# —— 不同优化器的可选超参（仅在对应类型时生效）——
+# Adam 系列（adam/adamw/adamax/nadam/radam/adamp/lamb）
+betas: [0.9, 0.999]
+eps: 1.0e-8
+amsgrad: false               # 仅 Adam/AdamW
+
+# SGD / RMSprop / Adagrad / Adadelta
+momentum: 0.9                # SGD/RMSprop
+nesterov: true               # SGD
+alpha: 0.99                  # RMSprop
+centered: false              # RMSprop
+lr_decay: 0.0                # Adagrad
+rho: 0.9                     # Adadelta
+
+# 提示：adamp/lamb 需要安装：
+#   pip install adamp
+#   pip install pytorch-lamb
+
+# ---------- 调度器 ----------
+scheduler_name: "cosine"     # 可选：step/multi_step/exp/cosine/sgdr/plateau/one_cycle/linear/poly/constant
+
+# = CosineAnnealingLR（余弦退火）
+T_max: null      # 留空则用 epochs
+eta_min: 1.0e-6  # 最小学习率
+
+# = StepLR
+step_size: 30
+gamma: 0.1
+
+# = MultiStepLR
+milestones: [30, 60, 90]
+# gamma: 0.1
+
+# = ExponentialLR
+# gamma: 0.95
+
+# = ReduceLROnPlateau（若使用它，请把 scheduler.step(val_loss['total']) 放在验证之后）
+mode: "min"
+factor: 0.5
+patience: 5
+threshold: 1.0e-4
+min_lr: 0.0
+verbose: false
+
+# = OneCycleLR（注意：必须 batch 级 step；当前 train_model() 是 epoch 级 step，不建议直接用）
+max_lr: 5.0e-4
+steps_per_epoch: null
+pct_start: 0.3
+anneal_strategy: "cos"
+div_factor: 25.0
+final_div_factor: 10000.0
+
+# = LinearLR（你在 super().__init__ 已传入 start_factor/end_factor）
+start_factor: 1.0
+end_factor: 1.0
+total_iters: null
+
+# = PolynomialLR
+power: 2.0
+# total_iters: null
+
+# = Constant（固定学习率）
+# 无额外参数
+
+# ---------- Warmup 组合 ----------
+use_warmup_scheduler: true  # super().__init__ 会读取它来创建 Warmup+主调度器
+warmup_epochs: 10
+# 你的默认：start_factor = 1.0 / max(1, warmup_epochs)，end_factor = 1.0
+# 如需与 LambdaLR 的 (epoch+1)/warmup_epochs 完全等价，设 start_factor = 1.0 / warmup_epochs, end_factor = 1.0
