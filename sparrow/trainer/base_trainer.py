@@ -106,6 +106,4 @@ class BaseTrainer:
     def export_onnx(self, model: nn.Module):
         raise NotImplemented
 
-    def export_wrapper(self, model: nn.Module):
-        raise NotImplemented
     # --- 辅助工具函数 ---
