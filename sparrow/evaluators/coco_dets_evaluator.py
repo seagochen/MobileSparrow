@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from typing import Dict, List
 
 import torch
@@ -51,7 +52,34 @@ class CocoDetectionEvaluator:
         os.makedirs(self.results_dir, exist_ok=True)
 
         self.dataset = self.loader.dataset
-        self.ann_file = self.dataset.ann_path
+
+        # --- 核心改动 1：修正 annotation file 的文件名 ---
+        dataset_root = Path(self.dataset.img_root).parent.parent
+        split = "train" if self.dataset.is_train else "val"
+
+        # 错误的文件名: ann_file_name = f"person_keypoints_{split}2017.json"
+        # 正确的文件名 (用于物体检测):
+        ann_file_name = f"instances_{split}2017.json"
+
+        self.ann_file = os.path.join(dataset_root, "annotations", ann_file_name)
+        if not os.path.exists(self.ann_file):
+            raise FileNotFoundError(f"Annotation file not found at constructed path: {self.ann_file}")
+
+        print("[Evaluator] Building image path to ID map...")
+        self.path_to_img_id = {}
+
+        # 直接从 annotation JSON 读取 mapping
+        with open(self.ann_file, "r") as f:
+            anno = json.load(f)
+        id_map = {im["file_name"]: im["id"] for im in anno["images"]}
+
+        for item in self.dataset.items:
+            img_path = item[0]
+            file_name = os.path.basename(img_path)
+            if file_name in id_map:
+                self.path_to_img_id[img_path] = id_map[file_name]
+
+        print(f"[Evaluator] Map created with {len(self.path_to_img_id)} entries.")
 
         # COCO评估需要原始的category_id, 而非连续的ID. 我们需要一个反向映射.
         self.contig2catid = {v: k for k, v in self.dataset.catid2contig.items()}
@@ -148,7 +176,7 @@ class CocoDetectionEvaluator:
             # 格式化为COCO结果
             for i, dets_per_img in enumerate(detections):
                 img_path = img_paths[i]
-                img_id = self.dataset.path_to_img_id[img_path]  # 假设dataset有此映射
+                img_id = self.path_to_img_id[img_path]
 
                 if dets_per_img.numel() == 0:
                     continue
