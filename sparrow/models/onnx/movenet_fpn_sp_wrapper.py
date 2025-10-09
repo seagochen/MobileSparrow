@@ -1,11 +1,11 @@
 import torch
 from torch import nn
 
-from sparrow.models.movenet_fpn_sp import MoveNet_FPN
+from sparrow.models.movenet_fpn_sp import MoveNet_FPN_SP
 
 
 class MoveNetExportWrapper(nn.Module):
-    def __init__(self, movenet: MoveNet_FPN):
+    def __init__(self, movenet: MoveNet_FPN_SP):
         super().__init__()
         self.movenet = movenet
 

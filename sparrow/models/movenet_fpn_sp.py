@@ -98,7 +98,7 @@ class SinglePoseHead(nn.Module):
         return {"heatmaps": heatmaps, "offsets": offsets}
 
 
-class MoveNet_FPN(nn.Module):
+class MoveNet_FPN_SP(nn.Module):
     """
     MoveNet 单人姿态估计模型（基于 FPN）
 

@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 
 import torch
 
-from sparrow.trainer.movenet_fpn_sp_trainer import MoveNetTrainer
+from sparrow.trainer.movenet_fpn_sp_trainer import MoveNetSingleTrainer
 from sparrow.trainer.sixrepnet_trainer import SixDRepNetTrainer
 from sparrow.trainer.ssdlite_fpn_trainer import SSDLiteTrainer
 
@@ -43,7 +43,7 @@ def load_model_pt(model: torch.nn.Module, path: Optional[str], strict: bool = Fa
 # ----------------------------
 TASKS = {
     "ssdlite": SSDLiteTrainer,
-    "movenet": MoveNetTrainer,
+    "movenet": MoveNetSingleTrainer,
     "sixrepnet": SixDRepNetTrainer,
 }
 

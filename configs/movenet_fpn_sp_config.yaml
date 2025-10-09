@@ -37,7 +37,7 @@ aug_cfg:
 
 # ---------- 损失 ----------
 hm_weight: 1.0          # 热图损失权重
-off_weight: 1.0         # 偏移损失权重
+off_weight: 0.1         # 偏移损失权重
 focal_alpha: 2.0        # Focal alpha
 focal_beta: 4.0         # Focal beta
 
