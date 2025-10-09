@@ -9,8 +9,9 @@ from torch import nn, autocast
 from tqdm import tqdm
 
 from sparrow.datasets.coco_kpts import create_kpts_dataloader
-from sparrow.losses.movenet_loss import MoveNet2HeadLoss
-from sparrow.models.movenet_fpn import MoveNet_FPN
+from sparrow.losses.movenet_fpn_sp_loss import MoveNet2HeadLoss
+from sparrow.models.movenet_fpn_sp import MoveNet_FPN
+from sparrow.models.onnx.movenet_fpn_sp_wrapper import MoveNetExportWrapper
 from sparrow.trainer.base_trainer import BaseTrainer
 from sparrow.trainer.components import clip_gradient, set_seed, load_ckpt_if_any, save_ckpt
 from sparrow.utils.logger import logger
@@ -23,7 +24,7 @@ class MoveNetTrainer(BaseTrainer):
     def __init__(self,  yaml_path: Optional[str] = None):
 
         # --- 加载训练配置信息 ---
-        cfg = update_from_yaml(yaml_path)
+        cfg, extra_cfg = update_from_yaml(yaml_path, return_extra=True)
 
         # --- 创建模型 ---
         backbone = timm.create_model(cfg.get("backbone", "mobilenetv3_large_100"),
@@ -57,6 +58,7 @@ class MoveNetTrainer(BaseTrainer):
             data_dir=cfg.get("data_dir", "/home/user/datasets/coco2017_movenet_sp"),
             save_dir=cfg.get("save_dir", "runs/movenet_fpn_mbv3"),
             device=device,
+            resume=cfg.get("resume", False),
 
             # Optimizer
             optimizer_name=cfg.get("optimizer_name", "adamw"),
@@ -79,7 +81,7 @@ class MoveNetTrainer(BaseTrainer):
             clip_grad_norm = cfg.get("clip_grad_norm", 1.0),
 
             # 其他参数
-            **cfg
+            **extra_cfg
         )
 
         # --- 加载数据集 ---
@@ -155,8 +157,14 @@ class MoveNetTrainer(BaseTrainer):
         count = 0  # 已处理的 batch 数量
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc=f"Epoch {epoch:03d}/{self.epochs}")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Train",  # ← 只保留缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历所有训练批次
         for step, (images, labels, kps_masks, _) in pbar:
@@ -173,7 +181,7 @@ class MoveNetTrainer(BaseTrainer):
             # 4.3 前向传播（使用混合精度）
             # autocast: 自动将部分操作转为 float16，加速训练
             ph, pw = None, None
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 模型预测
                 preds = model(images)
 
@@ -216,13 +224,13 @@ class MoveNetTrainer(BaseTrainer):
             count += 1
 
             # 4.8 更新进度条显示, 显示当前平均损失和学习率
-            pbar.set_postfix({
-                "loss": f"{running['total'] / count:.4f}",
-                "hm":   f"{running['hm'] / count:.4f}",
-                "off":  f"{running['off'] / count:.4f}",
-                "sz": f"{ph}x{pw}",
-                "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
-            })
+            # pbar.set_postfix({
+            #     "loss": f"{running['total'] / count:.4f}",
+            #     "hm":   f"{running['hm'] / count:.4f}",
+            #     "off":  f"{running['off'] / count:.4f}",
+            #     "sz": f"{ph}x{pw}",
+            #     "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
+            # })
 
         # 5. 返回本 epoch 的平均损失
         # max(1, count): 防止除零（虽然 count 不会为 0）
@@ -249,8 +257,14 @@ class MoveNetTrainer(BaseTrainer):
         }
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc="Valid")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Valid",  # ← 缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历所有训练批次
         for step, (images, labels, kps_masks, _) in pbar:
@@ -261,7 +275,7 @@ class MoveNetTrainer(BaseTrainer):
             kps_masks = kps_masks.to(self.device, non_blocking=True)
 
             # 4.2 前向传播（使用混合精度）
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 预测
                 preds = model(images)
 
@@ -296,7 +310,7 @@ class MoveNetTrainer(BaseTrainer):
         set_seed(self.cfg.get("seed", random.randrange(1, 100)))
 
         # Resume the training process
-        if self.cfg.get("resume", False):
+        if self.resume:
             start_epoch, best_val = load_ckpt_if_any(
                 model=self.model,
                 ckpt_path=os.path.join(self.save_dir, "last.pt"),
@@ -314,6 +328,9 @@ class MoveNetTrainer(BaseTrainer):
 
         # Training the model
         for epoch in range(start_epoch, self.epochs):
+
+            # 打印 epoch 头
+            print(f"Epoch {epoch + 1}/{self.epochs}:")  # ← 单独一行
 
             # Train the model
             train_loss = self.train_one_epoch(
@@ -365,7 +382,6 @@ class MoveNetTrainer(BaseTrainer):
                     "scaler": self.scaler.state_dict(),
                     "best_val_deg": best_val
                 }, self.save_dir, "best.pt")
-                print(f"[best] new best loss = {best_val:.3f}°  ->  {best_path}")
             # end-for: epoch in range(start_epoch, self.epochs)
 
         # Get the hist curves
@@ -381,8 +397,27 @@ class MoveNetTrainer(BaseTrainer):
             val_vals=val_total_loss_hist
         )
 
-    def export_onnx(self, model: nn.Module):
-        raise NotImplemented
+    def export_onnx(self):
+        # --- 包装模型 ---
+        wrapper = MoveNetExportWrapper(self.model)
+        wrapper.eval().to(self.device)
 
-    def export_wrapper(self, model: nn.Module):
-        raise NotImplemented
+        # --- 创建 dummy 输入，并移动到相同设备 ---
+        dummy = torch.randn(1, 3, 192, 192, device=self.device)
+
+        # --- 输出路径 ---
+        save_path = os.path.join(self.save_dir, "export.onnx")
+        os.makedirs(self.save_dir, exist_ok=True)
+
+        # Create an ONNX file
+        torch.onnx.export(
+            wrapper,
+            dummy,
+            save_path,
+            input_names=["images"],
+            output_names=["output"],
+            dynamic_axes={"images": {0: "batch"}, "output": {0: "batch"}},
+            opset_version=13
+        )
+
+        print(f"[export] ONNX model saved to {save_path}")
