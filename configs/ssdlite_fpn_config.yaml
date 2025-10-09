@@ -33,10 +33,12 @@ aug_cfg:
   p_color: 0.8           # 颜色扰动概率
 
 # ---------- 损失 ----------
-iou_pos: 0.45            # 正样本 IoU 阈值
-iou_neg: 0.30            # 负样本 IoU 阈值
+iou_pos: 0.40            # 正样本 IoU 阈值
+iou_neg: 0.20            # 负样本 IoU 阈值
 focal_alpha: 0.25        # 焦点损失 alpha（分类头）
 debug_assign: false      # 调试匹配（正/负样本分配）信息
+anchor_scales: [0.02, 0.05, 0.1, 0.2, 0.4]
+feature_strides: [4, 8, 16, 32, 64]
 
 # ---------- 训练流程 ----------
 epochs: 100

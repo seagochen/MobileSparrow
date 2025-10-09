@@ -36,7 +36,9 @@ class SSDLiteTrainer(BaseTrainer):
             backbone=backbone,
             num_classes=cfg.get("num_classes", 80),
             fpn_out_channels=cfg.get("fpn_out_channels", 128),
-            img_size=cfg.get("img_size", 320)
+            img_size=cfg.get("img_size", 320),
+            anchor_scales=cfg.get("anchor_scales", [0.02, 0.05, 0.1, 0.2, 0.4]),
+            feature_strides=cfg.get("feature_strides", [4, 8, 16, 32, 64]),
         )
 
         # --- 确定训练设备 ---
