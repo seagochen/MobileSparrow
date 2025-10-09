@@ -145,7 +145,7 @@ class SixDRepNetTrainer(BaseTrainer):
 
             # 4.3 前向传播（使用混合精度）
             # autocast: 自动将部分操作转为 float16，加速训练
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 模型预测 6D 向量
                 pred_6d = model(imgs)  # [B, 6]
 
@@ -253,7 +253,7 @@ class SixDRepNetTrainer(BaseTrainer):
             R_gt = batch["R_gt"].to(device, non_blocking=True)
 
             # 4.2 前向传播（使用混合精度）
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 预测 6D 向量并转换为旋转矩阵
                 pred_6d = model(imgs)
                 R_pred = model.compute_rotation_matrix_from_orthod(pred_6d)
@@ -395,10 +395,10 @@ class SixDRepNetTrainer(BaseTrainer):
                     'ylabel': 'Geodesic (rad)'
                 },
                 {
-                    'deg_mean': deg_mean_hist,
-                    'deg_median': deg_median_hist,
-                    'title': 'Geodesic Loss',
-                    'ylabel': 'Geodesic (rad)'
+                    'train_vals': deg_mean_hist,  # 平均角度误差
+                    'val_vals': deg_median_hist,  # 中位数角度误差
+                    'title': 'Geodesic Error',
+                    'ylabel': 'Degrees'
                 },
             ]
         )

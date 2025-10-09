@@ -173,7 +173,7 @@ class MoveNetTrainer(BaseTrainer):
             # 4.3 前向传播（使用混合精度）
             # autocast: 自动将部分操作转为 float16，加速训练
             ph, pw = None, None
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 模型预测
                 preds = model(images)
 
@@ -261,7 +261,7 @@ class MoveNetTrainer(BaseTrainer):
             kps_masks = kps_masks.to(self.device, non_blocking=True)
 
             # 4.2 前向传播（使用混合精度）
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 预测
                 preds = model(images)
 

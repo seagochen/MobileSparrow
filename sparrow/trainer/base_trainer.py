@@ -56,6 +56,7 @@ class BaseTrainer:
         self.clip_grad_norm = clip_grad_norm
         self.use_clip_grad = use_clip_grad
         self.use_ema = use_ema
+        self.use_amp = use_amp
 
         # --- 优化器和调度器 ---
         self.optimizer = select_optimizer(name=optimizer_name,
