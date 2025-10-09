@@ -15,6 +15,7 @@ class BaseTrainer:
                  model: nn.Module,
                  loss_fn: nn.Module,
                  *, data_dir: str,
+                 resume: bool = False,
                  save_dir: Optional[str] = None,
                  device: Optional[torch.device] = None,
 
@@ -48,6 +49,7 @@ class BaseTrainer:
         self.epochs = epochs
         self.save_dir = save_dir
         self.data_dir = data_dir
+        self.resume = resume
         self.cfg = kwargs
 
         # --- 训练技巧 ---
@@ -56,6 +58,7 @@ class BaseTrainer:
         self.clip_grad_norm = clip_grad_norm
         self.use_clip_grad = use_clip_grad
         self.use_ema = use_ema
+        self.use_amp = use_amp
 
         # --- 优化器和调度器 ---
         self.optimizer = select_optimizer(name=optimizer_name,
@@ -74,6 +77,8 @@ class BaseTrainer:
                                                      main_scheduler=self.scheduler,
                                                      start_factor=start_factor,
                                                      end_factor=end_factor)
+        # --- Others ---
+        self.BAR_FMT = "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
 
 
     # --- 需要子类实现的抽象方法 ---
@@ -105,6 +110,4 @@ class BaseTrainer:
     def export_onnx(self, model: nn.Module):
         raise NotImplemented
 
-    def export_wrapper(self, model: nn.Module):
-        raise NotImplemented
     # --- 辅助工具函数 ---

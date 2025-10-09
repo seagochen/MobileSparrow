@@ -23,7 +23,7 @@ class SSDLiteTrainer(BaseTrainer):
     def __init__(self,  yaml_path: Optional[str] = None):
 
         # --- 加载训练配置信息 ---
-        cfg = update_from_yaml(yaml_path)
+        cfg, extra_cfg = update_from_yaml(yaml_path, return_extra=True)
 
         # --- 创建模型 ---
         backbone = timm.create_model(cfg.get("backbone", "mobilenetv3_large_100"),
@@ -56,6 +56,7 @@ class SSDLiteTrainer(BaseTrainer):
             data_dir=cfg.get("data_dir", "/home/user/datasets/coco2017_ssdlite"),
             save_dir=cfg.get("save_dir", "runs/ssdlite_fpn_mbv3"),
             device=device,
+            resume=cfg.get("resume", False),
 
             # Optimizer
             optimizer_name=cfg.get("optimizer_name", "adamw"),
@@ -78,7 +79,7 @@ class SSDLiteTrainer(BaseTrainer):
             clip_grad_norm = cfg.get("clip_grad_norm", 1.0),
 
             # 其他参数
-            **cfg
+            **extra_cfg
         )
 
         # --- 加载数据集 ---
@@ -151,8 +152,14 @@ class SSDLiteTrainer(BaseTrainer):
         count = 0  # 已处理的 batch 数量
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc=f"Epoch {epoch:03d}/{self.epochs}")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Train",  # ← 只保留缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历所有训练批次
         for step, (images, labels, _) in pbar:
@@ -167,7 +174,7 @@ class SSDLiteTrainer(BaseTrainer):
 
             # 4.3 前向传播（使用混合精度）
             # autocast: 自动将部分操作转为 float16，加速训练
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 模型预测
                 preds = model(images)
 
@@ -202,12 +209,12 @@ class SSDLiteTrainer(BaseTrainer):
             count += 1
 
             # 4.8 更新进度条显示, 显示当前平均损失和学习率
-            pbar.set_postfix({
-                "loss": f"{running['total'] / count:.4f}",
-                "cls":   f"{running['cls'] / count:.4f}",
-                "reg":  f"{running['reg'] / count:.4f}",
-                "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
-            })
+            # pbar.set_postfix({
+            #     "loss": f"{running['total'] / count:.4f}",
+            #     "cls":   f"{running['cls'] / count:.4f}",
+            #     "reg":  f"{running['reg'] / count:.4f}",
+            #     "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
+            # })
 
         # 5. 返回本 epoch 的平均损失
         # max(1, count): 防止除零（虽然 count 不会为 0）
@@ -234,8 +241,14 @@ class SSDLiteTrainer(BaseTrainer):
         }
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc="Valid")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Valid",  # ← 缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历所有训练批次
         for step, (images, labels, _) in pbar:
@@ -245,7 +258,7 @@ class SSDLiteTrainer(BaseTrainer):
             labels = [t.to(self.device, non_blocking=True) for t in labels]
 
             # 4.2 前向传播（使用混合精度）
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 预测
                 preds = model(images)
 
@@ -272,7 +285,7 @@ class SSDLiteTrainer(BaseTrainer):
         set_seed(self.cfg.get("seed", random.randrange(1, 100)))
 
         # Resume the training process
-        if self.cfg.get("resume", False):
+        if self.resume:
             start_epoch, best_val = load_ckpt_if_any(
                 model=self.model,
                 ckpt_path=os.path.join(self.save_dir, "last.pt"),
@@ -290,6 +303,9 @@ class SSDLiteTrainer(BaseTrainer):
 
         # Training the model
         for epoch in range(start_epoch, self.epochs):
+
+            # 打印 epoch 头
+            print(f"Epoch {epoch + 1}/{self.epochs}:")  # ← 单独一行
 
             # Train the model
             train_loss = self.train_one_epoch(
@@ -341,7 +357,6 @@ class SSDLiteTrainer(BaseTrainer):
                     "scaler": self.scaler.state_dict(),
                     "best_val_deg": best_val
                 }, self.save_dir, "best.pt")
-                print(f"[best] new best loss = {best_val:.3f}°  ->  {best_path}")
             # end-for: epoch in range(start_epoch, self.epochs)
 
         # Get the hist curves
@@ -360,5 +375,3 @@ class SSDLiteTrainer(BaseTrainer):
     def export_onnx(self, model: nn.Module):
         raise NotImplemented
 
-    def export_wrapper(self, model: nn.Module):
-        raise NotImplemented
