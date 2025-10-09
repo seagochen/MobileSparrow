@@ -1,5 +1,5 @@
 
-from typing import Optional
+from typing import Optional, Dict
 
 import torch
 from torch import GradScaler
@@ -108,5 +108,14 @@ class BaseTrainer:
 
     def export_onnx(self):
         raise NotImplemented
+
+    def run_evaluation(self) -> Dict[str, float]:
+        """
+        运行面向最终任务指标的评估 (例如 AP, mIoU 等)。
+        子类应该重写此方法以实现特定任务的评估逻辑。
+        """
+        # 默认行为是打印一条消息并返回空字典
+        print(f"'{self.__class__.__name__}' has not implemented the task-specific 'run_evaluation' method.")
+        return {}
 
     # --- 辅助工具函数 ---

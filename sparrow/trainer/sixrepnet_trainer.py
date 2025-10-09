@@ -384,7 +384,7 @@ class SixDRepNetTrainer(BaseTrainer):
                     "best_val": best_val
                 }, self.save_dir, "best.pt")
                 logger.info("Sparrow", f"Best checkpoint saved to {best_path}")
-            # end-for: epoch in range(start_epoch, self.epochs)
+        # end-for: epoch in range(start_epoch, self.epochs)
 
         # Get the hist curves
         train_total_loss_hist = [t["total"] for t in hist["train"]]
@@ -414,7 +414,7 @@ class SixDRepNetTrainer(BaseTrainer):
                 {
                     'train_vals': deg_mean_hist,  # 平均角度误差
                     'val_vals': deg_median_hist,  # 中位数角度误差
-                    'title': 'Geodesic Error',
+                    'title': 'Average Geodesic Error',
                     'ylabel': 'Degrees'
                 },
             ]

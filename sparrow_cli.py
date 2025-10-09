@@ -77,24 +77,24 @@ def cmd_eval(args: argparse.Namespace) -> None:
         best = os.path.join(trainer.save_dir or ".", "best.pt")
         ckpt_path = best if os.path.isfile(best) else (last if os.path.isfile(last) else "")
 
-    if ckpt_path:
-        load_model_pt(trainer.model, ckpt_path, strict=False)
+    if not ckpt_path or not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(
+            "Could not find weights to evaluate. Use --weights or ensure 'best.pt' or 'last.pt' exists.")
 
-    # 统一调用 BaseTrainer 的 evaluate 签名
-    # 注意：有的任务（如 SixDRepNet）会返回 (loss_dict, metrics_dict)
-    out = trainer.evaluate(
-        model=trainer.model,
-        loss_fn=trainer.loss_fn,
-        epoch=0,
-        loader=trainer.val_dl,
-        device=trainer.device,
-    )
-    if isinstance(out, tuple):
-        loss_dict, metric_dict = out
-        print("[eval] loss:", loss_dict)
-        print("[eval] metrics:", metric_dict)
+    print(f"Loading weights from: {ckpt_path}")
+    load_model_pt(trainer.model, ckpt_path, strict=False)
+    trainer.model.to(trainer.device)  # 确保模型在正确的设备上
+
+    # --- 核心改动：调用新的评估方法 ---
+    metrics = trainer.run_evaluation()
+
+    # 打印格式化的结果
+    print("\n--- Evaluation Metrics ---")
+    if metrics:
+        for k, v in metrics.items():
+            print(f"{k:<8s}: {v:.4f}")
     else:
-        print("[eval] metrics:", out)
+        print("No metrics were returned.")
 
 # ----------------------------
 # 子命令：export

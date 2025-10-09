@@ -9,6 +9,7 @@ from torch import nn, autocast
 from tqdm import tqdm
 
 from sparrow.datasets.coco_kpts import create_kpts_dataloader
+from sparrow.evaluators.coco_kpts_evaluator import CocoKeypointsEvaluator
 from sparrow.losses.movenet_fpn_sp_loss import MoveNet2HeadLoss
 from sparrow.models.movenet_fpn_sp import MoveNet_FPN_SP
 from sparrow.models.onnx.movenet_fpn_sp_wrapper import MoveNetExportWrapper
@@ -383,7 +384,7 @@ class MoveNetSingleTrainer(BaseTrainer):
                     "best_val": best_val
                 }, self.save_dir, "best.pt")
                 logger.info("Sparrow", f"Best checkpoint saved to {best_path}")
-            # end-for: epoch in range(start_epoch, self.epochs)
+        # end-for: epoch in range(start_epoch, self.epochs)
 
         # Get the hist curves
         train_total_loss_hist = [t["total"] for t in hist["train"]]
@@ -422,3 +423,24 @@ class MoveNetSingleTrainer(BaseTrainer):
         )
 
         print(f"[export] ONNX model saved to {save_path}")
+
+
+    def run_evaluation(self) -> Dict[str, float]:
+        """
+        重写基类的评估方法，以运行OKS-AP评估。
+        """
+        print("\n" + "=" * 30)
+        print("Running OKS-AP Evaluation on Validation Set...")
+
+        # 1. 创建评估器实例
+        evaluator = CocoKeypointsEvaluator(
+            val_loader=self.val_dl,
+            stride=self.cfg.get("stride", 4),
+            results_dir=self.save_dir  # 将结果保存在运行目录下
+        )
+
+        # 2. 调用评估器的evaluate方法
+        metrics = evaluator.evaluate(self.model, self.device)
+
+        print("=" * 30 + "\n")
+        return metrics

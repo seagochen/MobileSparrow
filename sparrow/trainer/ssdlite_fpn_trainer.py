@@ -9,6 +9,7 @@ from torch import nn, autocast
 from tqdm import tqdm
 
 from sparrow.datasets.coco_dets import create_coco_ssd_dataloader
+from sparrow.evaluators.coco_dets_evaluator import CocoDetectionEvaluator
 from sparrow.losses.ssdlite_fpn_loss import SSDLoss
 from sparrow.models.onnx.ssdlite_fpn_wrapper import SSDLiteExportWrapper
 from sparrow.models.ssdlite_fpn import SSDLite_FPN
@@ -359,7 +360,7 @@ class SSDLiteTrainer(BaseTrainer):
                     "best_val": best_val
                 }, self.save_dir, "best.pt")
                 logger.info("Sparrow", f"Best checkpoint saved to {best_path}")
-            # end-for: epoch in range(start_epoch, self.epochs)
+        # end-for: epoch in range(start_epoch, self.epochs)
 
         # Get the hist curves
         train_total_loss_hist = [t["total"] for t in hist["train"]]
@@ -400,3 +401,21 @@ class SSDLiteTrainer(BaseTrainer):
         print(f"[export] ONNX model saved to {save_path}")
 
 
+    def run_evaluation(self) -> Dict[str, float]:
+        """
+        重写基类的评估方法，以运行IoU-mAP评估。
+        """
+        print("\n" + "=" * 30)
+        print("Running IoU-mAP Evaluation on Validation Set...")
+
+        # 1. 创建评估器实例
+        evaluator = CocoDetectionEvaluator(
+            val_loader=self.val_dl,
+            results_dir=self.save_dir
+        )
+
+        # 2. 调用评估器的evaluate方法
+        metrics = evaluator.evaluate(self.model, self.device)
+
+        print("=" * 30 + "\n")
+        return metrics
