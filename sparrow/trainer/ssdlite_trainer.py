@@ -23,7 +23,7 @@ class SSDLiteTrainer(BaseTrainer):
     def __init__(self,  yaml_path: Optional[str] = None):
 
         # --- 加载训练配置信息 ---
-        cfg = update_from_yaml(yaml_path)
+        cfg, extra_cfg = update_from_yaml(yaml_path, return_extra=True)
 
         # --- 创建模型 ---
         backbone = timm.create_model(cfg.get("backbone", "mobilenetv3_large_100"),
@@ -78,7 +78,7 @@ class SSDLiteTrainer(BaseTrainer):
             clip_grad_norm = cfg.get("clip_grad_norm", 1.0),
 
             # 其他参数
-            **cfg
+            **extra_cfg
         )
 
         # --- 加载数据集 ---
