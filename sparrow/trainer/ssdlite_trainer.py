@@ -56,6 +56,7 @@ class SSDLiteTrainer(BaseTrainer):
             data_dir=cfg.get("data_dir", "/home/user/datasets/coco2017_ssdlite"),
             save_dir=cfg.get("save_dir", "runs/ssdlite_fpn_mbv3"),
             device=device,
+            resume=cfg.get("resume", False),
 
             # Optimizer
             optimizer_name=cfg.get("optimizer_name", "adamw"),
@@ -284,7 +285,7 @@ class SSDLiteTrainer(BaseTrainer):
         set_seed(self.cfg.get("seed", random.randrange(1, 100)))
 
         # Resume the training process
-        if self.cfg.get("resume", False):
+        if self.resume:
             start_epoch, best_val = load_ckpt_if_any(
                 model=self.model,
                 ckpt_path=os.path.join(self.save_dir, "last.pt"),

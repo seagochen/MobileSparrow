@@ -15,6 +15,7 @@ class BaseTrainer:
                  model: nn.Module,
                  loss_fn: nn.Module,
                  *, data_dir: str,
+                 resume: bool = False,
                  save_dir: Optional[str] = None,
                  device: Optional[torch.device] = None,
 
@@ -48,6 +49,7 @@ class BaseTrainer:
         self.epochs = epochs
         self.save_dir = save_dir
         self.data_dir = data_dir
+        self.resume = resume
         self.cfg = kwargs
 
         # --- 训练技巧 ---
