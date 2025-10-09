@@ -128,8 +128,14 @@ class SixDRepNetTrainer(BaseTrainer):
         count = 0  # 已处理的 batch 数量
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc=f"Epoch {epoch:03d}/{self.epochs}")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Train",  # ← 只保留缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历所有训练批次
         for step, batch in pbar:
@@ -180,13 +186,13 @@ class SixDRepNetTrainer(BaseTrainer):
             count += 1
 
             # 4.8 更新进度条显示, 显示当前平均损失和学习率
-            pbar.set_postfix({
-                "loss": f"{running['total'] / count:.4f}",  # 平均总损失
-                "geo": f"{running['geo'] / count:.4f}",  # 平均测地损失
-                "col": f"{running['col'] / count:.4f}",  # 平均列向量损失
-                "reg": f"{running['reg'] / count:.4f}",  # 平均正则化损失
-                "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
-            })
+            # pbar.set_postfix({
+            #     "loss": f"{running['total'] / count:.4f}",  # 平均总损失
+            #     "geo": f"{running['geo'] / count:.4f}",  # 平均测地损失
+            #     "col": f"{running['col'] / count:.4f}",  # 平均列向量损失
+            #     "reg": f"{running['reg'] / count:.4f}",  # 平均正则化损失
+            #     "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
+            # })
 
         # 5. 返回本 epoch 的平均损失
         # max(1, count): 防止除零（虽然 count 不会为 0）
@@ -242,8 +248,14 @@ class SixDRepNetTrainer(BaseTrainer):
         agg_deg = []  # 存储每个样本的角度误差（用于计算统计量）
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc="Valid")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Valid",  # ← 缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历验证集（无需梯度）
         for step, batch in pbar:
@@ -311,6 +323,9 @@ class SixDRepNetTrainer(BaseTrainer):
 
         # Training the model
         for epoch in range(start_epoch, self.epochs):
+
+            # 打印 epoch 头
+            print(f"Epoch {epoch + 1}/{self.epochs}:")  # ← 单独一行
 
             # Train the model
             tr = self.train_one_epoch(

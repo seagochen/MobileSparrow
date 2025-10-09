@@ -75,6 +75,8 @@ class BaseTrainer:
                                                      main_scheduler=self.scheduler,
                                                      start_factor=start_factor,
                                                      end_factor=end_factor)
+        # --- Others ---
+        self.BAR_FMT = "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
 
 
     # --- 需要子类实现的抽象方法 ---

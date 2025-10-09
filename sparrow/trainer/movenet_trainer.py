@@ -155,8 +155,14 @@ class MoveNetTrainer(BaseTrainer):
         count = 0  # 已处理的 batch 数量
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc=f"Epoch {epoch:03d}/{self.epochs}")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Train",  # ← 只保留缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历所有训练批次
         for step, (images, labels, kps_masks, _) in pbar:
@@ -216,13 +222,13 @@ class MoveNetTrainer(BaseTrainer):
             count += 1
 
             # 4.8 更新进度条显示, 显示当前平均损失和学习率
-            pbar.set_postfix({
-                "loss": f"{running['total'] / count:.4f}",
-                "hm":   f"{running['hm'] / count:.4f}",
-                "off":  f"{running['off'] / count:.4f}",
-                "sz": f"{ph}x{pw}",
-                "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
-            })
+            # pbar.set_postfix({
+            #     "loss": f"{running['total'] / count:.4f}",
+            #     "hm":   f"{running['hm'] / count:.4f}",
+            #     "off":  f"{running['off'] / count:.4f}",
+            #     "sz": f"{ph}x{pw}",
+            #     "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
+            # })
 
         # 5. 返回本 epoch 的平均损失
         # max(1, count): 防止除零（虽然 count 不会为 0）
@@ -249,8 +255,14 @@ class MoveNetTrainer(BaseTrainer):
         }
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc="Valid")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Valid",  # ← 缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历所有训练批次
         for step, (images, labels, kps_masks, _) in pbar:
@@ -314,6 +326,9 @@ class MoveNetTrainer(BaseTrainer):
 
         # Training the model
         for epoch in range(start_epoch, self.epochs):
+
+            # 打印 epoch 头
+            print(f"Epoch {epoch + 1}/{self.epochs}:")  # ← 单独一行
 
             # Train the model
             train_loss = self.train_one_epoch(
