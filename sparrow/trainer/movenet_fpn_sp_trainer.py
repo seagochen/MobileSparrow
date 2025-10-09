@@ -425,22 +425,88 @@ class MoveNetSingleTrainer(BaseTrainer):
         print(f"[export] ONNX model saved to {save_path}")
 
 
+    @staticmethod
+    @torch.no_grad()
+    def _decode_predictions(heatmaps: torch.Tensor, offsets: torch.Tensor, stride: int) -> torch.Tensor:
+        """
+        Helper to decode heatmaps and offsets into keypoint coordinates (x, y, score).
+        This can be used for both model predictions and ground truth labels.
+        """
+        batch_size, num_joints, h, w = heatmaps.shape
+        # Heatmaps are already probabilities (if GT) or logits (if pred), sigmoid handles both
+        heatmaps = torch.sigmoid(heatmaps)
+        scores, inds = torch.max(heatmaps.view(batch_size, num_joints, -1), dim=2)
+        y_coords = (inds / w).int().float()
+        x_coords = (inds % w).int().float()
+
+        offsets = offsets.view(batch_size, num_joints, 2, h, w)
+        offset_x = offsets[:, :, 0, :, :].view(batch_size, num_joints, -1).gather(2, inds.unsqueeze(-1)).squeeze(-1)
+        offset_y = offsets[:, :, 1, :, :].view(batch_size, num_joints, -1).gather(2, inds.unsqueeze(-1)).squeeze(-1)
+
+        pred_x = (x_coords + offset_x) * stride
+        pred_y = (y_coords + offset_y) * stride
+
+        return torch.stack([pred_x, pred_y, scores], dim=2)
+
     def run_evaluation(self) -> Dict[str, float]:
         """
-        重写基类的评估方法，以运行OKS-AP评估。
+        重写基类的评估方法，以运行 PCK (Percentage of Correct Keypoints) 评估。
+        此版本无需修改Dataset，直接从GT label张量中解码真实坐标。
         """
         print("\n" + "=" * 30)
-        print("Running OKS-AP Evaluation on Validation Set...")
+        print("Running PCK Evaluation on Validation Set...")
+        self.model.eval()
 
-        # 1. 创建评估器实例
-        evaluator = CocoKeypointsEvaluator(
-            val_loader=self.val_dl,
-            stride=self.cfg.get("stride", 4),
-            results_dir=self.save_dir  # 将结果保存在运行目录下
-        )
+        pck_thresholds = [0.05, 0.10, 0.20]
+        img_size = self.cfg.get("img_size", 192)
+        stride = self.cfg.get("stride", 4)
+        num_joints = self.cfg.get("num_joints", 17)
 
-        # 2. 调用评估器的evaluate方法
-        metrics = evaluator.evaluate(self.model, self.device)
+        thresholds_px = {f"PCK@{thr:.2f}": thr * img_size for thr in pck_thresholds}
+        correct_kpts = {key: 0 for key in thresholds_px.keys()}
+        total_visible_kpts = 0
+
+        pbar = tqdm(self.val_dl, desc="[Evaluator] Calculating PCK", ncols=110)
+        # The loop remains unchanged, expecting 4 items from the dataloader
+        for images, labels, kps_masks, _ in pbar:
+            images = images.to(self.device)
+            labels = labels.to(self.device)
+            kps_masks = kps_masks.to(self.device)
+
+            # 1. 模型推理和解码预测坐标
+            preds = self.model(images)
+            pred_kpts = self._decode_predictions(
+                preds["heatmaps"],
+                preds["offsets"],
+                stride
+            ).to(self.device)
+
+            # 2. 从标签张量中解码真实坐标
+            gt_hm = labels[:, :num_joints]
+            gt_off = labels[:, num_joints:]
+            gt_kpts = self._decode_predictions(gt_hm, gt_off, stride).to(self.device)
+
+            # 3. 计算PCK (逻辑与之前完全相同)
+            visible_mask = kps_masks > 0
+
+            if visible_mask.sum() == 0:
+                continue
+
+            total_visible_kpts += visible_mask.sum().item()
+            errors = torch.linalg.norm(pred_kpts[:, :, :2] - gt_kpts[:, :, :2], dim=2)
+            errors[~visible_mask] = float('inf')
+
+            for key, thr_px in thresholds_px.items():
+                correct_kpts[key] += (errors <= thr_px).sum().item()
+
+        # 4. 计算最终结果
+        metrics = {}
+        if total_visible_kpts > 0:
+            for key, count in correct_kpts.items():
+                metrics[key] = count / total_visible_kpts
+        else:
+            for key in thresholds_px.keys():
+                metrics[key] = 0.0
 
         print("=" * 30 + "\n")
         return metrics

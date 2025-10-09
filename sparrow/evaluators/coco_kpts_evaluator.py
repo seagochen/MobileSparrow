@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from typing import Dict
 
 import numpy as np
@@ -27,16 +28,28 @@ class CocoKeypointsEvaluator:
             stride (int): 模型的总步长 (例如 4 或 8)
             results_dir (str): 保存中间结果JSON文件的目录
         """
+
         self.loader = val_loader
         self.stride = stride
         self.results_dir = results_dir
         os.makedirs(self.results_dir, exist_ok=True)
 
-        # 从数据加载器中获取COCO数据集的真实标注文件路径
-        # 假设dataset对象有一个ann_path属性
-        self.ann_file = self.loader.dataset.ann_path
+        # --- 核心改动：动态构建 annotation file 路径 ---
+        dataset = self.loader.dataset
+
+        # 1. 从 dataset.img_root (e.g., ".../coco/images/val2017") 推断出数据集根目录
+        #    Path(...).parent.parent 会向上两级，得到 ".../coco"
+        dataset_root = Path(dataset.img_root).parent.parent
+
+        # 2. 根据 is_train 标志确定文件名
+        split = "train" if dataset.is_train else "val"
+        ann_file_name = f"person_keypoints_{split}2017.json"
+
+        # 3. 组合成完整路径
+        self.ann_file = os.path.join(dataset_root, "annotations", ann_file_name)
+
         if not os.path.exists(self.ann_file):
-            raise FileNotFoundError(f"Annotation file not found at: {self.ann_file}")
+            raise FileNotFoundError(f"Annotation file not found at constructed path: {self.ann_file}")
 
     @torch.no_grad()
     def _decode_predictions(self, heatmaps: torch.Tensor, offsets: torch.Tensor) -> np.ndarray:
@@ -78,7 +91,23 @@ class CocoKeypointsEvaluator:
 
             for i, path in enumerate(img_paths):
                 # 从文件名(e.g., '000000123456.jpg')中提取 image_id
-                img_id = int(os.path.splitext(os.path.basename(path))[0])
+                # img_id = int(os.path.splitext(os.path.basename(path))[0])
+                # kpts = pred_kpts[i]
+
+                # --- START OF CHANGE ---
+
+                # Original line that caused the error:
+                # img_id = int(os.path.splitext(os.path.basename(path))[0])
+
+                # NEW, ROBUST WAY:
+                # Get filename without extension, e.g., "000000397133_aid200887"
+                filename_base = os.path.splitext(os.path.basename(path))[0]
+                # The original image_id is the part before the first underscore
+                original_img_id_str = filename_base.split('_')[0]
+                img_id = int(original_img_id_str)
+
+                # --- END OF CHANGE ---
+
                 kpts = pred_kpts[i]
 
                 coco_kpts = np.zeros(17 * 3, dtype=np.float32)
