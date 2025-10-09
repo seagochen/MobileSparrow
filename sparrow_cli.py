@@ -9,8 +9,8 @@ from typing import Dict, Any, Optional, Tuple
 import torch
 
 # === 直接引用新的 Trainer 类（它们各自会在 __init__(yaml_path) 内部完成一切）===
-from sparrow.trainer.ssdlite_trainer import SSDLiteTrainer
-from sparrow.trainer.movenet_trainer import MoveNetTrainer
+from sparrow.trainer.ssdlite_sp_trainer import SSDLiteTrainer
+from sparrow.trainer.movenet_fpn_sp_trainer import MoveNetTrainer
 from sparrow.trainer.sixrepnet_trainer import SixDRepNetTrainer
 
 # ----------------------------

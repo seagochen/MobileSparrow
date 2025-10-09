@@ -9,7 +9,7 @@ from torch import nn, autocast
 from tqdm import tqdm
 
 from sparrow.datasets.coco_dets import create_coco_ssd_dataloader
-from sparrow.losses.ssdlite_loss import SSDLoss
+from sparrow.losses.ssdlite_fpn_loss import SSDLoss
 from sparrow.models.ssdlite_fpn import SSDLite_FPN
 from sparrow.trainer.base_trainer import BaseTrainer
 from sparrow.trainer.components import clip_gradient, set_seed, load_ckpt_if_any, save_ckpt
