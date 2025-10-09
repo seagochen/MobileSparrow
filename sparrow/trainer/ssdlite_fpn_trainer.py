@@ -374,22 +374,28 @@ class SSDLiteTrainer(BaseTrainer):
         )
 
     def export_onnx(self):
-        # Create a wrapper for SSDLite model
+        # --- 包装模型 ---
         wrapper = SSDLiteExportWrapper(self.model)
-        wrapper.eval()
+        wrapper.eval().to(self.device)
 
-        # Create a dummy input
-        dummy = torch.randn(1, 3, 320, 320)
+        # --- 创建 dummy 输入，并移动到相同设备 ---
+        dummy = torch.randn(1, 3, 320, 320, device=self.device)
+
+        # --- 输出路径 ---
+        save_path = os.path.join(self.save_dir, "export.onnx")
+        os.makedirs(self.save_dir, exist_ok=True)
 
         # Export the model to ONNX
         torch.onnx.export(
             wrapper,
             dummy,
-            os.path.join(self.save_dir, "export.onnx"),
+            save_path,
             input_names=["images"],
             output_names=["output"],
             dynamic_axes={"images": {0: "batch"}, "output": {0: "batch"}},
             opset_version=13
         )
+
+        print(f"[export] ONNX model saved to {save_path}")
 
 

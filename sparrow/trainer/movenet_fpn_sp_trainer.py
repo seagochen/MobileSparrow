@@ -398,21 +398,26 @@ class MoveNetTrainer(BaseTrainer):
         )
 
     def export_onnx(self):
-
-        # Create a wrapper for MoveNet_SP
+        # --- 包装模型 ---
         wrapper = MoveNetExportWrapper(self.model)
-        wrapper.eval()
+        wrapper.eval().to(self.device)
 
-        # Dummy with 192x192
-        dummy = torch.randn(1, 3, 192, 192)
+        # --- 创建 dummy 输入，并移动到相同设备 ---
+        dummy = torch.randn(1, 3, 192, 192, device=self.device)
+
+        # --- 输出路径 ---
+        save_path = os.path.join(self.save_dir, "export.onnx")
+        os.makedirs(self.save_dir, exist_ok=True)
 
         # Create an ONNX file
         torch.onnx.export(
             wrapper,
             dummy,
-            os.path.join(self.save_dir, "export.onnx"),
+            save_path,
             input_names=["images"],
             output_names=["output"],
             dynamic_axes={"images": {0: "batch"}, "output": {0: "batch"}},
             opset_version=13
         )
+
+        print(f"[export] ONNX model saved to {save_path}")

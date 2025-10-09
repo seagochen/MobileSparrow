@@ -420,24 +420,29 @@ class SixDRepNetTrainer(BaseTrainer):
         )
 
     def export_onnx(self):
-
-        # Wrap the model with a wrapper class
+        # --- 包装模型 ---
         wrapper = SixDRepNetExportWrapper(self.model)
-        wrapper.eval()
+        wrapper.eval().to(self.device)
 
-        # Create a dummy input for ONNX export
-        dummy = torch.randn(1, 3, 224, 224)
+        # --- 创建 dummy 输入，并移动到相同设备 ---
+        dummy = torch.randn(1, 3, 224, 224, device=self.device)
 
-        # Export the model to ONNX
+        # --- 输出路径 ---
+        save_path = os.path.join(self.save_dir, "export.onnx")
+        os.makedirs(self.save_dir, exist_ok=True)
+
+        # --- 导出 ---
         torch.onnx.export(
             wrapper,
             dummy,
-            os.path.join(self.save_dir, "export.onnx"),
+            save_path,
             input_names=["images"],
             output_names=["rotation_matrix"],
             dynamic_axes={"images": {0: "batch"}, "rotation_matrix": {0: "batch"}},
             opset_version=13
         )
+
+        print(f"[export] ONNX model saved to {save_path}")
 
 
     @staticmethod
