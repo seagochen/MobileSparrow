@@ -130,24 +130,23 @@ def update_from_yaml(yaml_path: Optional[str] = None,
                 if isinstance(loaded, dict):
                     yaml_cfg = loaded
                 elif loaded is None:
-                    logger.warning("[config] YAML is empty: %s -> using defaults.", yaml_path)
+                    logger.warning("config", f"YAML is empty: {yaml_path} -> using defaults.")
                 else:
-                    logger.warning("[config] YAML content not a dict (%s), using defaults.", type(loaded).__name__)
+                    logger.warning("config", f"YAML content not a dict ({type(loaded).__name__}), using defaults.", )
         except Exception as e:
-            logger.warning("[config] Failed to load YAML: %s; Using defaults. Error: %s", yaml_path, e)
+            logger.error_trace("config", f"Failed to load YAML: {yaml_path}; Using defaults.")
     elif yaml_path:
-        logger.warning("[config] YAML not found: %s; Using defaults.", yaml_path)
+        logger.warning("config", f"YAML not found: {yaml_path}; Using defaults.")
     else:
-        print("[config] No YAML path provided, using defaults")
+        logger.warning("config", "No YAML path provided, using defaults")
 
     cfg: Dict[str, Any] = base
     cfg.update(yaml_cfg)
 
     if yaml_cfg:
-        print(f"[config] Loaded configuration from: {yaml_path}")
-        print(f"[config] Updated {len(yaml_cfg)} keys: {', '.join(sorted(yaml_cfg.keys()))}")
+        logger.info("config", f"Updated configuration from: {yaml_path}")
     else:
-        print("[config] Using default configuration only")
+        logger.warning("config", "No configuration loaded from YAML, using defaults.")
 
     _pretty_print_config(cfg)
 
