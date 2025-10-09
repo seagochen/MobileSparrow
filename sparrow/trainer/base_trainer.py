@@ -95,10 +95,6 @@ class BaseTrainer:
                         device: torch.device):
         raise NotImplemented
 
-
-    def train_model(self):
-        raise NotImplemented
-
     def evaluate(self,
                  model: nn.Module,
                  loss_fn: nn.Module,
@@ -107,7 +103,10 @@ class BaseTrainer:
                  device: torch.device):
         raise NotImplemented
 
-    def export_onnx(self, model: nn.Module):
+    def train_model(self):
+        raise NotImplemented
+
+    def export_onnx(self):
         raise NotImplemented
 
     # --- 辅助工具函数 ---

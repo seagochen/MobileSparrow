@@ -11,7 +11,7 @@ from tqdm import tqdm
 from sparrow.datasets.coco_kpts import create_kpts_dataloader
 from sparrow.losses.movenet_fpn_sp_loss import MoveNet2HeadLoss
 from sparrow.models.movenet_fpn_sp import MoveNet_FPN
-from sparrow.models.onnx.movenet_wrapper import MoveNetExportWrapper
+from sparrow.models.onnx.movenet_fpn_sp_wrapper import MoveNetExportWrapper
 from sparrow.trainer.base_trainer import BaseTrainer
 from sparrow.trainer.components import clip_gradient, set_seed, load_ckpt_if_any, save_ckpt
 from sparrow.utils.logger import logger
@@ -397,18 +397,18 @@ class MoveNetTrainer(BaseTrainer):
             val_vals=val_total_loss_hist
         )
 
-    def export_onnx(self, model: nn.Module):
+    def export_onnx(self):
 
         # Create a wrapper for MoveNet_SP
-        model = MoveNetExportWrapper(self.model)
-        model.eval()
+        wrapper = MoveNetExportWrapper(self.model)
+        wrapper.eval()
 
         # Dummy with 192x192
         dummy = torch.randn(1, 3, 192, 192)
 
         # Create an ONNX file
         torch.onnx.export(
-            model,
+            wrapper,
             dummy,
             os.path.join(self.save_dir, "export.onnx"),
             input_names=["images"],

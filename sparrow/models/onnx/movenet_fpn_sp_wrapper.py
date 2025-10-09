@@ -12,11 +12,11 @@ class MoveNetExportWrapper(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         将 MoveNet 的输出打包为单个 tensor 结构:
-        [B, 56, 1]
+        [B, 56]
         """
         preds = self.movenet(x)
         heatmaps = preds["heatmaps"]  # [B, 17, H, W]
-        offsets = preds["offsets"]    # [B, 34, H, W]
+        offsets = preds["offsets"]  # [B, 34, H, W]
 
         # 1 解析出每个关键点的坐标和置信度
         # 假设我们直接取每个 heatmap 的 argmax 作为关键点位置
@@ -51,10 +51,10 @@ class MoveNetExportWrapper(nn.Module):
 
         # 目标置信度：平均关键点置信度
         score = max_vals.mean(dim=1, keepdim=True)
-
+    
         # 4 拼接为统一输出
         out = torch.cat([
             lx, ly, rx, ry, score, keypoints.view(B, -1)
-        ], dim=1).unsqueeze(-1)  # [B, 56, 1]
-
+        ], dim=1)  # [B, 56]
+    
         return out

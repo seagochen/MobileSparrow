@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 import torch
 
-# === 直接引用新的 Trainer 类（它们各自会在 __init__(yaml_path) 内部完成一切）===
-from sparrow.trainer.ssdlite_sp_trainer import SSDLiteTrainer
 from sparrow.trainer.movenet_fpn_sp_trainer import MoveNetTrainer
 from sparrow.trainer.sixrepnet_trainer import SixDRepNetTrainer
+from sparrow.trainer.ssdlite_fpn_trainer import SSDLiteTrainer
+
 
 # ----------------------------
 # 小工具：读取 YAML（用于给 Trainer 传路径即可）
@@ -112,7 +112,7 @@ def cmd_export(args: argparse.Namespace) -> None:
     # 优先调用任务自带导出（若已实现）
     if hasattr(trainer, "export_onnx"):
         try:
-            trainer.export_onnx(trainer.model)  # 某些任务可能内部读取形状/保存路径
+            trainer.export_onnx()  # 某些任务可能内部读取形状/保存路径
             return
         except NotImplementedError:
             pass

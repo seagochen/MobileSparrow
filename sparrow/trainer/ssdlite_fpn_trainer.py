@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from sparrow.datasets.coco_dets import create_coco_ssd_dataloader
 from sparrow.losses.ssdlite_fpn_loss import SSDLoss
+from sparrow.models.onnx.ssdlite_fpn_wrapper import SSDLiteExportWrapper
 from sparrow.models.ssdlite_fpn import SSDLite_FPN
 from sparrow.trainer.base_trainer import BaseTrainer
 from sparrow.trainer.components import clip_gradient, set_seed, load_ckpt_if_any, save_ckpt
@@ -372,6 +373,23 @@ class SSDLiteTrainer(BaseTrainer):
             val_vals=val_total_loss_hist
         )
 
-    def export_onnx(self, model: nn.Module):
-        raise NotImplemented
+    def export_onnx(self):
+        # Create a wrapper for SSDLite model
+        wrapper = SSDLiteExportWrapper(self.model)
+        wrapper.eval()
+
+        # Create a dummy input
+        dummy = torch.randn(1, 3, 320, 320)
+
+        # Export the model to ONNX
+        torch.onnx.export(
+            wrapper,
+            dummy,
+            os.path.join(self.save_dir, "export.onnx"),
+            input_names=["images"],
+            output_names=["output"],
+            dynamic_axes={"images": {0: "batch"}, "output": {0: "batch"}},
+            opset_version=13
+        )
+
 

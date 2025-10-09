@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from sparrow.datasets.biwi_rotation import BIWIDataset
 from sparrow.losses.sixrepnet_loss import SixDCombinedLoss
+from sparrow.models.onnx.sixrepnet_wrapper import SixDRepNetExportWrapper
 from sparrow.models.sixrepnet import SixDRepNet
 from sparrow.trainer.base_trainer import BaseTrainer
 from sparrow.trainer.components import clip_gradient, set_seed, load_ckpt_if_any, save_ckpt
@@ -418,8 +419,25 @@ class SixDRepNetTrainer(BaseTrainer):
             ]
         )
 
-    def export_onnx(self, model: nn.Module):
-        raise NotImplemented
+    def export_onnx(self):
+
+        # Wrap the model with a wrapper class
+        wrapper = SixDRepNetExportWrapper(self.model)
+        wrapper.eval()
+
+        # Create a dummy input for ONNX export
+        dummy = torch.randn(1, 3, 224, 224)
+
+        # Export the model to ONNX
+        torch.onnx.export(
+            wrapper,
+            dummy,
+            os.path.join(self.save_dir, "export.onnx"),
+            input_names=["images"],
+            output_names=["rotation_matrix"],
+            dynamic_axes={"images": {0: "batch"}, "rotation_matrix": {0: "batch"}},
+            opset_version=13
+        )
 
 
     @staticmethod
