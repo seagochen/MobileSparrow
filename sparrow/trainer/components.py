@@ -496,58 +496,75 @@ def load_ckpt_if_any(
 ) -> tuple[int, float]:
     """
     加载训练检查点（如果存在）- 用于恢复训练或模型推理
-
+    
     功能：
-      1. 加载模型权重（必须）
-      2. 加载优化器状态（可选，用于恢复训练）
-      3. 加载混合精度训练的 scaler 状态（可选）
-      4. 恢复训练进度信息（epoch 和最佳验证指标）
-
-    典型使用场景：
-      - 训练中断后恢复训练（resume training）
-      - 加载预训练模型进行微调（fine-tuning）
-      - 加载最佳模型进行推理（inference）
-
+      1. 自动检测设备（从模型参数推断）
+      2. 加载模型权重（必需）
+      3. 加载优化器状态（可选，用于恢复训练）
+      4. 加载混合精度训练的 scaler 状态（可选）
+      5. 恢复训练进度信息（epoch 和最佳验证指标）
+    
     参数:
       model: PyTorch 模型实例
       ckpt_path: 检查点文件路径（.pth 或 .pt 文件）
-      optimizer: 优化器实例（如 Adam, SGD），训练时传入，推理时可为 None
-      scaler: 混合精度训练的 GradScaler 实例，不使用 AMP 时可为 None
-      device: 目标设备（'cuda' 或 'cpu'），用于加载张量到正确的设备
-              如果为 None，自动从模型参数推断设备
-
-    返回:
-      (start_epoch, best): 元组
-        - start_epoch: 起始训练轮数
-            - 如果成功加载检查点：返回保存时的 epoch
-            - 如果未加载：返回 0（从头开始训练）
-        - best: 最佳验证指标（这里是角度误差，单位：度）
-            - 如果成功加载：返回保存的最佳验证结果
-            - 如果未加载：返回 inf（表示还没有验证结果）
-
-    检查点文件结构（字典）：
-      {
-          "model": model.state_dict(),          # 模型权重（必需）
-          "optim": optimizer.state_dict(),      # 优化器状态（可选）
-          "scaler": scaler.state_dict(),        # AMP scaler 状态（可选）
-          "epoch": int,                         # 当前训练轮数（可选）
-          "best_val_deg": float                 # 最佳验证角度误差（可选）
-      }
-
-    示例:
-      # 场景 1：恢复训练（自动检测设备）
-      start_epoch, best_val = load_ckpt_if_any(
-          model, "checkpoints/last.pth", optimizer, scaler
-      )
-
-      # 场景 2：加载到指定设备
-      start_epoch, best_val = load_ckpt_if_any(
-          model, "checkpoints/last.pth", optimizer, scaler,
-          device=torch.device("cuda:0")
-      )
-
-      # 场景 3：推理模式（无 optimizer 和 scaler）
-      start_epoch, _ = load_ckpt_if_any(model, "checkpoints/best.pth")
+      optimizer: 优化器实例（训练时需要，推理时可为 None）
+      scaler: AMP GradScaler 实例（使用混合精度训练时需要）
+      device: 目标设备，如果为 None，则自动从模型参数推断
+    
+    返回值:
+      tuple[int, float]: (起始轮数, 最佳验证指标)
+        - 起始轮数:
+            - 加载成功: 返回检查点保存时的 epoch
+            - 加载失败: 返回 0（从头开始训练）
+        - 最佳验证指标:
+            - 加载成功: 返回检查点中保存的最佳值
+            - 加载失败: 返回 float("inf")（表示无最佳值）
+    
+    检查点文件结构:
+    {
+        "model": model.state_dict(),      # 必需：模型权重
+        "optim": optimizer.state_dict(),  # 可选：优化器状态
+        "scaler": scaler.state_dict(),    # 可选：AMP scaler 状态
+        "epoch": int,                     # 可选：当前训练轮数
+        "best_val": float                 # 可选：最佳验证指标
+    }
+    
+    使用场景:
+    1. 恢复训练
+       ```python
+       start_epoch, best_val = load_ckpt_if_any(
+           model, "checkpoints/last.pth", optimizer, scaler
+       )
+       ```
+    
+    2. 指定设备加载
+       ```python
+       start_epoch, best_val = load_ckpt_if_any(
+           model, "checkpoints/last.pth", optimizer, scaler,
+           device=torch.device("cuda:0")
+       )
+       ```
+    
+    3. 仅加载模型（推理）
+       ```python
+       start_epoch, _ = load_ckpt_if_any(model, "checkpoints/best.pth")
+       ```
+    
+    注意事项:
+    1. 设备检测逻辑：
+       - 如果指定了 device 参数，使用指定的设备
+       - 否则从模型的第一个参数推断设备
+       - 如果模型无参数，默认使用 CPU 并发出警告
+    
+    2. 检查点加载：
+       - 使用 strict=True 确保模型结构完全匹配
+       - 通过 map_location 将张量加载到正确的设备
+       - 使用 logger.info 记录加载过程
+    
+    3. 可选组件：
+       - optimizer 状态加载仅在继续训练时需要
+       - scaler 状态仅在使用 AMP 时需要
+       - 训练进度信息（epoch, best_val）用于恢复训练点
     """
     # 自动检测设备：如果未指定，从模型参数推断
     if device is None:
@@ -599,9 +616,9 @@ def load_ckpt_if_any(
         best = ckpt.get("best_val", float("inf"))
 
         # 6. 打印恢复信息（方便调试和日志记录）
-        logger.info("load_ckpt_if_any", f"[weights] loaded {ckpt_path} "
-                                        f"(epoch={start_epoch}, best={best:.3f}°, "
-                                        f"device={device})")
+        logger.info("load", f"[weights] loaded {ckpt_path} "
+                            f"(epoch={start_epoch}, best={best:.4f}, "
+                            f"device={device})")
 
         # 返回训练起始信息
         return start_epoch, best
@@ -617,6 +634,6 @@ def save_ckpt(state, out_dir, name):
     out.mkdir(parents=True, exist_ok=True)
     path = out / name
     torch.save(state, path)
-    logger.info("save_ckpt", f"[weights] saved {path}")
+    logger.info("save", f"[weights] saved {path}")
 
     return str(path)

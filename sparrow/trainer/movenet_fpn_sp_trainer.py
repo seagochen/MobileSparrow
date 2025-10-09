@@ -369,7 +369,7 @@ class MoveNetSingleTrainer(BaseTrainer):
                 "model": self.model.state_dict(),
                 "optim": self.optimizer.state_dict(),
                 "scaler": self.scaler.state_dict(),
-                "best_val_deg": best_val
+                "best_val": best_val
             }, self.save_dir, "last.pt")
 
             # save best
@@ -380,8 +380,9 @@ class MoveNetSingleTrainer(BaseTrainer):
                     "model": self.model.state_dict(),
                     "optim": self.optimizer.state_dict(),
                     "scaler": self.scaler.state_dict(),
-                    "best_val_deg": best_val
+                    "best_val": best_val
                 }, self.save_dir, "best.pt")
+                logger.info("Sparrow", f"Best checkpoint saved to {best_path}")
             # end-for: epoch in range(start_epoch, self.epochs)
 
         # Get the hist curves
