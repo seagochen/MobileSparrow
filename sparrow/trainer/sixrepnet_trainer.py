@@ -382,7 +382,6 @@ class SixDRepNetTrainer(BaseTrainer):
                     "scaler": self.scaler.state_dict(),
                     "best_val_deg": best_val
                 }, self.save_dir, "best.pt")
-                print(f"[best] new best mean geodesic = {best_val:.3f}°  ->  {best_path}")
             # end-for: epoch in range(start_epoch, self.epochs)
 
         # Get the hist curves
