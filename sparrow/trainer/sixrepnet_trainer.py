@@ -20,6 +20,7 @@ from sparrow.trainer.components import clip_gradient, set_seed, load_ckpt_if_any
 from sparrow.utils.logger import logger
 from sparrow.utils.plot_curves import plot_training_curves
 from sparrow.utils.yaml_config import update_from_yaml
+from sparrow.evaluators import geodesic_accuracy as g_acc
 
 
 class SixDRepNetTrainer(BaseTrainer):
@@ -523,3 +524,64 @@ class SixDRepNetTrainer(BaseTrainer):
         # 8. 转换为角度（度）
         return theta * (180.0 / math.pi)  # [B] - 度数
 
+
+    @torch.no_grad()
+    def run_evaluation(self):
+        """
+        评估入口：供 CLI 调用（风格与 mAP 评估类似：聚合 -> 得到一组标量指标）。
+        返回 metrics: dict，CLI 可以统一打印/记录/保存。
+        """
+        print("\n" + "=" * 30)
+        print("Running Geodesic Evaluation on Validation Set...")
+
+        self.model.eval()
+        device = self.device if hasattr(self, "device") else next(self.model.parameters()).device
+
+        all_errors = []
+
+        for batch in self.val_dl:
+            images = batch["image"].to(device, non_blocking=True)     # [B,3,H,W]
+            R_gt   = batch["R_gt"].to(device)                        # [B,3,3]
+
+            # 前向
+            pred = self.model(images)                                 # 可能是 [B,6] 或 [B,3,3]
+
+            # 统一转成旋转矩阵
+            if pred.dim() == 2 and pred.size(-1) == 6:
+                R_pred = g_acc.rotation_6d_to_matrix(pred)
+            elif pred.dim() == 3 and pred.size(-1) == 3 and pred.size(-2) == 3:
+                R_pred = pred
+            else:
+                raise ValueError(f"Unexpected model output shape: {tuple(pred.shape)}; expect [B,6] or [B,3,3]")
+
+            # geodesic 角误差（度）
+            err_deg = g_acc.geodesic_angle_deg(R_pred, R_gt)               # [B]
+            all_errors.append(err_deg.detach().cpu())
+
+        # 聚合
+        errors = torch.cat(all_errors, dim=0)                         # [N]
+        mean_deg   = errors.mean().item()
+        median_deg = errors.median().item()
+
+        # Acc@δ（近似“百分比准确度”）
+        acc5   = g_acc.accuracy_at_threshold(errors,  5.0)
+        acc10  = g_acc.accuracy_at_threshold(errors, 10.0)
+        acc15  = g_acc.accuracy_at_threshold(errors, 15.0)
+        acc20  = g_acc.accuracy_at_threshold(errors, 20.0)
+
+        # Accuracy 曲线 + AUC（“角度版 mAP”）
+        _, _, acc_auc = g_acc.accuracy_curve_and_auc(errors, max_deg=30.0, step=0.5)
+
+        metrics = {
+            "num_samples": int(errors.numel()),
+            "mean_deg":   float(mean_deg),
+            "median_deg": float(median_deg),
+            "acc@5":      float(acc5),
+            "acc@10":     float(acc10),
+            "acc@15":     float(acc15),
+            "acc@20":     float(acc20),
+            "acc_auc_0_30deg": float(acc_auc),  # 越接近1越好
+        }
+
+        print("=" * 30 + "\n")
+        return metrics
