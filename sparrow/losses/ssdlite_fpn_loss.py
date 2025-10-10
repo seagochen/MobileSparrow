@@ -282,16 +282,16 @@ class SSDLoss(nn.Module):
         # beta=1/9 是 Faster R-CNN/RetinaNet 的常用设置
         loss_reg = F.smooth_l1_loss(reg_pred_pos, target_deltas, beta=1 / 9, reduction="sum") / num_pos
 
-        # 10. Calculate the total loss
-        total_loss = loss_cls * self.cls_weight + loss_reg * self.reg_weight
-
         # 10. 返回总损失和详细信息（detach 避免影响梯度）
-        if self.use_awl:  # Return different losses separately for AWL
-            return total_loss.detach(), {
+        if self.use_awl:
+            # If using AWL, the trainer only needs the raw, attached losses.
+            return None, {
                 "cls_loss": loss_cls,
                 "reg_loss": loss_reg
             }
-        else:  # Normally
+        else:
+            # Otherwise, calculate and return the manually weighted total loss.
+            total_loss = loss_cls * self.cls_weight + loss_reg * self.reg_weight
             return total_loss, {
                 "cls_loss": loss_cls.detach(),
                 "reg_loss": loss_reg.detach()

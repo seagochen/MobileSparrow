@@ -69,7 +69,7 @@ class BaseTrainer:
         # --- 优化器和调度器 ---
         if self.use_awl:
             self.num_tasks = num_tasks
-            self.awl = AutomaticWeightedLoss(num_tasks=self.num_tasks)
+            self.awl = AutomaticWeightedLoss(num_tasks=self.num_tasks).to(device)
             self.optimizer = select_optimizer(
                 name=optimizer_name,
                 # 将模型参数和 awl 参数合并

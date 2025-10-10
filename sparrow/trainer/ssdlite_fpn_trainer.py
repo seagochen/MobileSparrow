@@ -306,6 +306,15 @@ class SSDLiteTrainer(BaseTrainer):
                     preds["bbox_deltas"],
                     labels)
 
+                # If awl is activate
+                if self.use_awl:
+                    # Decompand the sub-loss
+                    loss_cls = details["cls_loss"]
+                    loss_reg = details["reg_loss"]
+
+                    # Use awl to update the final loss
+                    loss = self.awl([loss_cls, loss_reg])
+
             # 4.3. 累加损失
             running["total"] += loss.detach().item()
             running["cls"]   += details["cls_loss"].item()
