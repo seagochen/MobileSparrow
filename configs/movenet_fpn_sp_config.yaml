@@ -19,7 +19,7 @@ head_midc: 32                     # 头部中间通道
 upsample_to_quarter: true         # True：输出上采样到 1/4 分辨率（适配 stride=4 标签）
 
 # ---------- 输入与数据加载 ----------
-img_size: 192          # 输入尺寸（你的 create_kpts_dataloader_aug() 在用）
+img_size: 192           # 输入尺寸（你的 create_kpts_dataloader_aug() 在用）
 stride: 4               # 标签/特征步长（4 或 8；与 upsample_to_quarter 逻辑相关）
 batch_size: 64
 num_workers: 4          # DataLoader 的 worker 数

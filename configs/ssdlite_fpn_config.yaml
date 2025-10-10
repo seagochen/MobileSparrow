@@ -26,19 +26,19 @@ pin_memory: true
 # 训练集使用 aug_cfg；验证集使用 non-aug（在代码中固定：无色彩/平移/旋转/缩放）
 aug_cfg:
   p_flip: 0.5            # 左右翻转概率
-  scale: [0.8, 1.2]      # 随机缩放范围（最小, 最大）
-  rotate: 10.0           # 最大旋转角（度）
-  translate: 0.08        # 平移幅度（相对）
+  scale: [0.5, 1.5]      # 随机缩放范围（最小, 最大）
+  rotate: 20.0           # 最大旋转角（度）
+  translate: 0.20        # 平移幅度（相对）
   color: true            # 是否使用颜色扰动
   p_color: 0.8           # 颜色扰动概率
 
 # ---------- 损失 ----------
-iou_pos: 0.40            # 正样本 IoU 阈值
-iou_neg: 0.20            # 负样本 IoU 阈值
+iou_pos: 0.50            # 正样本 IoU 阈值
+iou_neg: 0.40            # 负样本 IoU 阈值
 focal_alpha: 0.25        # 焦点损失 alpha（分类头）
 debug_assign: false      # 调试匹配（正/负样本分配）信息
-anchor_scales: [0.02, 0.05, 0.1, 0.2, 0.4]
-feature_strides: [4, 8, 16, 32, 64]
+anchor_scales:    [0.04, 0.08, 0.16, 0.32, 0.64, 0.9] # 为6层金字塔提供6个尺度
+feature_strides:  [4,    8,    16,   32,   64,   128]
 
 # ---------- 训练流程 ----------
 epochs: 100
@@ -51,9 +51,9 @@ use_clip_grad: true          # 是否开启梯度裁剪
 clip_grad_norm: 1.0          # 全局梯度范数阈值（<=0 表示不裁剪）
 
 # ---------- 优化器 ----------
-optimizer_name: "adamw"      # 可选：adamw/adam/sgd/rmsprop/adagrad/adadelta/adamax/nadam/radam/adamp/lamb
+optimizer_name: "adamw"       # 可选：adamw/adam/sgd/rmsprop/adagrad/adadelta/adamax/nadam/radam/adamp/lamb
 lr: 3.0e-4
-weight_decay: 1.0e-4
+weight_decay: 5.0e-4          # <-- 尝试从 1e-4 增加到 5e-4
 
 # —— 不同优化器的可选超参（仅在对应类型时生效）——
 # Adam 系列（adam/adamw/adamax/nadam/radam/adamp/lamb）

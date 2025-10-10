@@ -195,7 +195,7 @@ class SSDLite_FPN(nn.Module):
         self.backbone = backbone
         self.num_classes = int(num_classes)
         self.img_size = int(img_size)
-        self.feature_strides = feature_strides or [8, 16, 32, 64, 128]  # P3~P7 的下采样率
+        self.feature_strides = feature_strides or [4, 8, 16, 32, 64, 128]  # P2~P7
 
         # 1) 创建 FPN：将 Backbone 的 C3,C4,C5 融合成 P3,P4,P5
         backbone_channels = self.backbone.feature_info.channels()  # 获取 (C3,C4,C5) 的通道数
@@ -206,7 +206,7 @@ class SSDLite_FPN(nn.Module):
             nn.Conv2d(fpn_out_channels, fpn_out_channels, kernel_size=3, stride=2, padding=1),  # P5 -> P6
             nn.Conv2d(fpn_out_channels, fpn_out_channels, kernel_size=3, stride=2, padding=1)  # P6 -> P7
         ])
-        self.feature_map_channels = [fpn_out_channels] * 5  # P3~P7 都使用相同的通道数
+        self.feature_map_channels = [fpn_out_channels] * 6  # P2~P7
 
         # 3) Anchor 生成器：为每个特征层生成密集的 anchor boxes
         self.anchor_gen = SSDAnchorGenerator(
@@ -245,20 +245,23 @@ class SSDLite_FPN(nn.Module):
     def _collect_features(self, x: torch.Tensor) -> List[torch.Tensor]:
         """
         收集多尺度特征金字塔
-
         流程：
-          1. Backbone 提取 C3, C4, C5
-          2. FPN 融合生成 P3, P4, P5
-          3. ExtraLayers 生成 P6, P7
-
-        返回: [P3, P4, P5, P6, P7] - 5 个不同尺度的特征图
+          1. Backbone 提取 C2, C3, C4, C5
+          2. FPN 融合生成 P2, P3, P4, P5
+          3. ExtraLayers 从 P5 生成 P6, P7
+        返回: [P2, P3, P4, P5, P6, P7] - 6 个不同尺度的特征图
         """
-        feats = self.backbone(x)  # Backbone 前向传播，返回多层特征
-        c3, c4, c5 = feats[-3], feats[-2], feats[-1]  # 提取 C3, C4, C5
-        p3, p4, p5 = self.fpn((c3, c4, c5))  # FPN 融合
-        p6 = self.extra_layers[0](p5)  # P5 下采样生成 P6
-        p7 = self.extra_layers[1](p6)  # P6 下采样生成 P7
-        return [p3, p4, p5, p6, p7]
+        feats = self.backbone(x)  # Backbone 现在返回4层特征
+        c2, c3, c4, c5 = feats[-4], feats[-3], feats[-2], feats[-1]  # 提取 C2, C3, C4, C5
+
+        fpn_outputs = self.fpn((c2, c3, c4, c5))  # FPN 融合，返回 [P2, P3, P4, P5]
+        p5 = fpn_outputs[-1]  # 取出P5用于生成P6, P7
+
+        p6 = self.extra_layers[0](p5)
+        p7 = self.extra_layers[1](p6)
+
+        return fpn_outputs + [p6, p7]  # 拼接成 [P2, P3, P4, P5, P6, P7]
+
 
     def _maybe_build_anchors(self, features: List[torch.Tensor], device: torch.device):
         """

@@ -31,7 +31,7 @@ class MoveNetSingleTrainer(BaseTrainer):
         backbone = timm.create_model(cfg.get("backbone", "mobilenetv3_large_100"),
                                      pretrained=True,
                                      features_only=True,
-                                     out_indices=(2, 3, 4))
+                                     out_indices=(1, 2, 3, 4))
         model = MoveNet_FPN_SP(
             backbone=backbone,
             num_joints=cfg.get("num_joints", 17),

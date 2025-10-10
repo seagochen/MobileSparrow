@@ -31,7 +31,7 @@ class SSDLiteTrainer(BaseTrainer):
         backbone = timm.create_model(cfg.get("backbone", "mobilenetv3_large_100"),
                                      pretrained=True,
                                      features_only=True,
-                                     out_indices=(2, 3, 4))
+                                     out_indices=(1, 2, 3, 4))
         model = SSDLite_FPN(
             backbone=backbone,
             num_classes=cfg.get("num_classes", 80),
