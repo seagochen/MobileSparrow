@@ -50,7 +50,8 @@ class SSDLiteTrainer(BaseTrainer):
             iou_threshold_pos=cfg.get("iou_pos", 0.45),
             iou_threshold_neg=cfg.get("iou_neg", 0.30),
             focal_alpha=cfg.get("focal_alpha", 0.25),
-            debug_assign=cfg.get("debug_assign", False)
+            reg_weight = cfg.get("reg_weight", 1.0),
+            cls_weight = cfg.get("cls_weight", 0.2),
         )
 
         # --- 初始化 super ---

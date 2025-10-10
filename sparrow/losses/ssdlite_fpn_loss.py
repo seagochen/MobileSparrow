@@ -76,25 +76,28 @@ class SSDLoss(nn.Module):
                  num_classes: int,
                  iou_threshold_pos: float = 0.5,
                  iou_threshold_neg: float = 0.4,
+                 reg_weight: float = 1.0,
+                 cls_weight: float = 0.2,
                  focal_alpha: float = 0.25,
-                 focal_gamma: float = 2.0,
-                 debug_assign: bool = False):
+                 focal_gamma: float = 2.0):
         """
         参数:
           num_classes: 前景类别数（不包括背景）
           iou_threshold_pos: 正样本 IoU 阈值（≥ 该值视为正样本）
           iou_threshold_neg: 负样本 IoU 阈值（< 该值视为背景）
+          reg_weight: regression loss weight
+          cls_weight: classification loss weight
           focal_alpha: Focal Loss 的 alpha 参数（正负样本平衡）
           focal_gamma: Focal Loss 的 gamma 参数（困难样本关注度）
-          debug_assign: 是否打印样本分配的调试信息
         """
         super().__init__()
         self.num_classes = int(num_classes)
         self.iou_threshold_pos = float(iou_threshold_pos)
         self.iou_threshold_neg = float(iou_threshold_neg)
+        self.reg_weight = float(reg_weight)
+        self.cls_weight = float(cls_weight)
         self.focal_alpha = float(focal_alpha)
         self.focal_gamma = float(focal_gamma)
-        self.debug_assign = bool(debug_assign)
 
         self.anchor_utils = AnchorGenerator()
         # 边界框编码的标准差（用于归一化回归目标）
@@ -160,13 +163,6 @@ class SSDLoss(nn.Module):
             # 这保证了小目标或难以匹配的 GT 也能有至少一个正样本
             labels[b, idx_g] = gt_cls
             matched[b, idx_g] = gt_box
-
-            # 6. 调试信息：打印前 5 个类别的样本分布
-            if self.debug_assign:
-                uniq, cnt = torch.unique(labels[b][labels[b] >= 0], return_counts=True)
-                pairs = sorted([(int(c.item()), int(n.item())) for c, n in zip(uniq, cnt)],
-                               key=lambda x: x[1], reverse=True)[:5]
-                print("[assign] pos per-class top5:", pairs)
 
         return labels, matched
 
@@ -284,7 +280,7 @@ class SSDLoss(nn.Module):
         loss_reg = F.smooth_l1_loss(reg_pred_pos, target_deltas, beta=1 / 9, reduction="sum") / num_pos
 
         # 10. 返回总损失和详细信息（detach 避免影响梯度）
-        total_loss = loss_cls + loss_reg
+        total_loss = loss_cls * self.cls_weight + loss_reg * self.reg_weight
         return total_loss, {
             "cls_loss": loss_cls.detach(),
             "reg_loss": loss_reg.detach()

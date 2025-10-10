@@ -36,9 +36,10 @@ aug_cfg:
 iou_pos: 0.50            # 正样本 IoU 阈值
 iou_neg: 0.40            # 负样本 IoU 阈值
 focal_alpha: 0.25        # 焦点损失 alpha（分类头）
-debug_assign: false      # 调试匹配（正/负样本分配）信息
 anchor_scales:    [0.04, 0.08, 0.16, 0.32, 0.64, 0.9] # 为6层金字塔提供6个尺度
 feature_strides:  [4,    8,    16,   32,   64,   128]
+reg_weight:  1.5          # Regression loss weight
+cls_weight:  1.0          # Classification loss weight
 
 # ---------- 训练流程 ----------
 epochs: 100
