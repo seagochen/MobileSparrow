@@ -10,7 +10,7 @@ from pycocotools.cocoeval import COCOeval
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from sparrow.models.movenet_fpn_sp import MoveNet_FPN_SP
+from sparrow.models.movenet_fpn import MoveNet_FPN
 
 
 class CocoKeypointsEvaluator:
@@ -69,12 +69,12 @@ class CocoKeypointsEvaluator:
 
         return torch.stack([pred_x, pred_y, scores], dim=2).cpu().numpy()
 
-    def evaluate(self, model: MoveNet_FPN_SP, device: torch.device) -> Dict[str, float]:
+    def evaluate(self, model: MoveNet_FPN, device: torch.device) -> Dict[str, float]:
         """
         执行完整的评估流程并返回指标字典
 
         Args:
-            model (MoveNet_FPN_SP): 待评估的模型
+            model (MoveNet_FPN): 待评估的模型
             device (torch.device): 运行设备
 
         Returns:

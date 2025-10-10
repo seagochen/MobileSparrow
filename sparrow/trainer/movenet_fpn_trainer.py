@@ -9,10 +9,9 @@ from torch import nn, autocast
 from tqdm import tqdm
 
 from sparrow.datasets.coco_kpts import create_kpts_dataloader
-from sparrow.evaluators.coco_kpts_evaluator import CocoKeypointsEvaluator
-from sparrow.losses.movenet_fpn_sp_loss import MoveNet2HeadLoss
-from sparrow.models.movenet_fpn_sp import MoveNet_FPN_SP
-from sparrow.models.onnx.movenet_fpn_sp_wrapper import MoveNetExportWrapper
+from sparrow.losses.movenet_fpn_loss import MoveNet2HeadLoss
+from sparrow.models.movenet_fpn import MoveNet_FPN
+from sparrow.models.onnx.movenet_fpn_wrapper import MoveNetExportWrapper
 from sparrow.trainer.base_trainer import BaseTrainer
 from sparrow.trainer.components import clip_gradient, set_seed, load_ckpt_if_any, save_ckpt
 from sparrow.utils.logger import logger
@@ -20,7 +19,7 @@ from sparrow.utils.plot_curves import plot_training_curve
 from sparrow.utils.yaml_config import update_from_yaml
 
 
-class MoveNetSingleTrainer(BaseTrainer):
+class MoveNetTrainer(BaseTrainer):
 
     def __init__(self,  yaml_path: Optional[str] = None):
 
@@ -32,7 +31,7 @@ class MoveNetSingleTrainer(BaseTrainer):
                                      pretrained=True,
                                      features_only=True,
                                      out_indices=(1, 2, 3, 4))
-        model = MoveNet_FPN_SP(
+        model = MoveNet_FPN(
             backbone=backbone,
             num_joints=cfg.get("num_joints", 17),
             fpn_out_channels=cfg.get("fpn_out_channels", 128),
