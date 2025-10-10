@@ -23,6 +23,9 @@ BASE_TRAINER_RESERVED_KEYS: Set[str] = {
     "betas", "eps", "amsgrad", "momentum", "nesterov",
     "alpha", "centered", "lr_decay", "rho",
 
+    # AWL
+    "use_awl", "num_tasks",
+
     # 学习率调度器（尽量全）
     "scheduler_name", "T_max", "eta_min",
     "step_size", "gamma", "milestones",

@@ -41,6 +41,7 @@ feature_strides:  [4,    8,    16,   32,   64,   128]
 reg_weight: 1.0           # The weight of regression loss in the total loss
 cls_weight: 1.0           # The weight of classification loss in the total loss
 use_awl: true             # Whether to use automatic weight loss
+num_tasks: 2              # The number of tasks for automatic weight loss
 
 # ---------- 训练流程 ----------
 epochs: 100
@@ -99,7 +100,6 @@ factor: 0.5
 patience: 5
 threshold: 1.0e-4
 min_lr: 0.0
-verbose: false
 
 # = OneCycleLR（注意：必须 batch 级 step；当前 train_model() 是 epoch 级 step，不建议直接用）
 max_lr: 5.0e-4

@@ -10,7 +10,6 @@ from tqdm import tqdm
 
 from sparrow.datasets.coco_dets import create_coco_ssd_dataloader
 from sparrow.evaluators.coco_dets_evaluator import CocoDetectionEvaluator
-from sparrow.losses.automatic_weighted_loss import AutomaticWeightedLoss
 from sparrow.losses.ssdlite_fpn_loss import SSDLoss
 from sparrow.models.onnx.ssdlite_fpn_wrapper import SSDLiteExportWrapper
 from sparrow.models.ssdlite_fpn import SSDLite_FPN
@@ -71,8 +70,8 @@ class SSDLiteTrainer(BaseTrainer):
             weight_decay=cfg.get("weight_decay",  1e-4),
 
             # 动态权重调节器
-            use_awl=True,
-            num_tasks=2,
+            use_awl=cfg.get("use_awl", True),
+            num_tasks=cfg.get("num_tasks", 2),
 
             # Scheduler
             scheduler_name=cfg.get("scheduler_name", "cosine"),
@@ -155,11 +154,20 @@ class SSDLiteTrainer(BaseTrainer):
         model.train()
 
         # 2. 初始化损失累加器
-        running = {
-            "total": 0.0,       # 总损失（加权组合）
-            "cls": 0.0,         # 分类损失
-            "reg": 0.0,         # bbox偏移损失
-        }
+        if self.use_awl:
+            running = {
+                "total": 0.0,  # 总损失（加权组合）
+                "cls": 0.0,  # 分类损失
+                "reg": 0.0,  # bbox偏移损失
+                "cls_weight": 1.0,
+                "reg_weight": 1.0,
+            }
+        else:
+            running = {
+                "total": 0.0,       # 总损失（加权组合）
+                "cls": 0.0,         # 分类损失
+                "reg": 0.0,         # bbox偏移损失
+            }
         count = 0  # 已处理的 batch 数量
 
         # 3. 创建进度条
@@ -227,24 +235,28 @@ class SSDLiteTrainer(BaseTrainer):
             running["cls"]   += details["cls_loss"].item()
             running["reg"]   += details["reg_loss"].item()
             count += 1
+        # for-end: step, batch in pbar
 
-            # 4.8. Print out the updated weight of loss
-            if self.use_awl:
+        # 4.8. 获取 epoch 结束时的最终权重
+        if self.use_awl:
+            with torch.no_grad():
                 weights = torch.exp(-self.awl.log_sigma_sq)
-                pbar.set_postfix({"cls_w": f"{weights[0].item():.2f}", "reg_w": f"{weights[1].item():.2f}"})
+            running["cls_weight"] = weights[0].item()
+            running["reg_weight"] = weights[1].item()
 
-            # 4.8 更新进度条显示, 显示当前平均损失和学习率
-            # pbar.set_postfix({
-            #     "loss": f"{running['total'] / count:.4f}",
-            #     "cls":   f"{running['cls'] / count:.4f}",
-            #     "reg":  f"{running['reg'] / count:.4f}",
-            #     "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
-            # })
+        # 5. 返回本 epoch 的平均损失和最终权重
+        # 对 loss 进行平均，但对 weight 不进行平均
+        # 创建一个新字典用于返回
+        results = {}
+        for k, v in running.items():
+            if "weight" in k:
+                # 如果是权重，直接赋值，不作平均
+                results[k] = v
+            else:
+                # 如果是损失，计算平均值
+                results[k] = v / max(1, count)
 
-        # 5. 返回本 epoch 的平均损失
-        # max(1, count): 防止除零（虽然 count 不会为 0）
-        return {k: v / max(1, count) for k, v in running.items()}
-
+        return results
 
     @torch.no_grad()
     def evaluate(self,
