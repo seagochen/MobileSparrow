@@ -9,7 +9,9 @@ from torch import nn, autocast
 from tqdm import tqdm
 
 from sparrow.datasets.coco_dets import create_coco_ssd_dataloader
-from sparrow.losses.ssdlite_loss import SSDLoss
+from sparrow.evaluators.coco_dets_evaluator import CocoDetectionEvaluator
+from sparrow.losses.ssdlite_fpn_loss import SSDLoss
+from sparrow.models.onnx.ssdlite_fpn_wrapper import SSDLiteExportWrapper
 from sparrow.models.ssdlite_fpn import SSDLite_FPN
 from sparrow.trainer.base_trainer import BaseTrainer
 from sparrow.trainer.components import clip_gradient, set_seed, load_ckpt_if_any, save_ckpt
@@ -23,18 +25,20 @@ class SSDLiteTrainer(BaseTrainer):
     def __init__(self,  yaml_path: Optional[str] = None):
 
         # --- 加载训练配置信息 ---
-        cfg = update_from_yaml(yaml_path)
+        cfg, extra_cfg = update_from_yaml(yaml_path, return_extra=True)
 
         # --- 创建模型 ---
         backbone = timm.create_model(cfg.get("backbone", "mobilenetv3_large_100"),
                                      pretrained=True,
                                      features_only=True,
-                                     out_indices=(2, 3, 4))
+                                     out_indices=(1, 2, 3, 4))
         model = SSDLite_FPN(
             backbone=backbone,
             num_classes=cfg.get("num_classes", 80),
             fpn_out_channels=cfg.get("fpn_out_channels", 128),
-            img_size=cfg.get("img_size", 320)
+            img_size=cfg.get("img_size", 320),
+            anchor_scales=cfg.get("anchor_scales", [0.02, 0.05, 0.1, 0.2, 0.4]),
+            feature_strides=cfg.get("feature_strides", [4, 8, 16, 32, 64]),
         )
 
         # --- 确定训练设备 ---
@@ -54,8 +58,9 @@ class SSDLiteTrainer(BaseTrainer):
             model,
             loss_fn,
             data_dir=cfg.get("data_dir", "/home/user/datasets/coco2017_ssdlite"),
-            save_dir=cfg.get("save_dir", "runs/ssdlite_fpn_mbv3"),
+            save_dir=cfg.get("save_dir", "runs/detection_mbv3"),
             device=device,
+            resume=cfg.get("resume", False),
 
             # Optimizer
             optimizer_name=cfg.get("optimizer_name", "adamw"),
@@ -78,7 +83,7 @@ class SSDLiteTrainer(BaseTrainer):
             clip_grad_norm = cfg.get("clip_grad_norm", 1.0),
 
             # 其他参数
-            **cfg
+            **extra_cfg
         )
 
         # --- 加载数据集 ---
@@ -151,8 +156,14 @@ class SSDLiteTrainer(BaseTrainer):
         count = 0  # 已处理的 batch 数量
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc=f"Epoch {epoch:03d}/{self.epochs}")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Train",  # ← 只保留缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历所有训练批次
         for step, (images, labels, _) in pbar:
@@ -167,7 +178,7 @@ class SSDLiteTrainer(BaseTrainer):
 
             # 4.3 前向传播（使用混合精度）
             # autocast: 自动将部分操作转为 float16，加速训练
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 模型预测
                 preds = model(images)
 
@@ -202,12 +213,12 @@ class SSDLiteTrainer(BaseTrainer):
             count += 1
 
             # 4.8 更新进度条显示, 显示当前平均损失和学习率
-            pbar.set_postfix({
-                "loss": f"{running['total'] / count:.4f}",
-                "cls":   f"{running['cls'] / count:.4f}",
-                "reg":  f"{running['reg'] / count:.4f}",
-                "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
-            })
+            # pbar.set_postfix({
+            #     "loss": f"{running['total'] / count:.4f}",
+            #     "cls":   f"{running['cls'] / count:.4f}",
+            #     "reg":  f"{running['reg'] / count:.4f}",
+            #     "lr": f"{optimizer.param_groups[0]['lr']:.2e}"  # 当前学习率
+            # })
 
         # 5. 返回本 epoch 的平均损失
         # max(1, count): 防止除零（虽然 count 不会为 0）
@@ -234,8 +245,14 @@ class SSDLiteTrainer(BaseTrainer):
         }
 
         # 3. 创建进度条
-        pbar = tqdm(enumerate(loader, 1), total=len(loader), ncols=120,
-                    desc="Valid")
+        pbar = tqdm(
+            enumerate(loader, 1),
+            total=len(loader),
+            ncols=120,
+            desc="    Valid",  # ← 缩进+名称
+            bar_format=self.BAR_FMT,  # ← 使用统一格式
+            leave=True  # ← 保留完成后的行
+        )
 
         # 4. 遍历所有训练批次
         for step, (images, labels, _) in pbar:
@@ -245,7 +262,7 @@ class SSDLiteTrainer(BaseTrainer):
             labels = [t.to(self.device, non_blocking=True) for t in labels]
 
             # 4.2 前向传播（使用混合精度）
-            with autocast(device_type=device.type, enabled=self.use_ema, dtype=torch.float16):
+            with autocast(device_type=device.type, enabled=self.use_amp, dtype=torch.float16):
                 # 预测
                 preds = model(images)
 
@@ -272,7 +289,7 @@ class SSDLiteTrainer(BaseTrainer):
         set_seed(self.cfg.get("seed", random.randrange(1, 100)))
 
         # Resume the training process
-        if self.cfg.get("resume", False):
+        if self.resume:
             start_epoch, best_val = load_ckpt_if_any(
                 model=self.model,
                 ckpt_path=os.path.join(self.save_dir, "last.pt"),
@@ -290,6 +307,9 @@ class SSDLiteTrainer(BaseTrainer):
 
         # Training the model
         for epoch in range(start_epoch, self.epochs):
+
+            # 打印 epoch 头
+            print(f"Epoch {epoch + 1}/{self.epochs}:")  # ← 单独一行
 
             # Train the model
             train_loss = self.train_one_epoch(
@@ -328,7 +348,7 @@ class SSDLiteTrainer(BaseTrainer):
                 "model": self.model.state_dict(),
                 "optim": self.optimizer.state_dict(),
                 "scaler": self.scaler.state_dict(),
-                "best_val_deg": best_val
+                "best_val": best_val
             }, self.save_dir, "last.pt")
 
             # save best
@@ -339,10 +359,10 @@ class SSDLiteTrainer(BaseTrainer):
                     "model": self.model.state_dict(),
                     "optim": self.optimizer.state_dict(),
                     "scaler": self.scaler.state_dict(),
-                    "best_val_deg": best_val
+                    "best_val": best_val
                 }, self.save_dir, "best.pt")
-                print(f"[best] new best loss = {best_val:.3f}°  ->  {best_path}")
-            # end-for: epoch in range(start_epoch, self.epochs)
+                logger.info("Sparrow", f"Best checkpoint saved to {best_path}")
+        # end-for: epoch in range(start_epoch, self.epochs)
 
         # Get the hist curves
         train_total_loss_hist = [t["total"] for t in hist["train"]]
@@ -357,8 +377,47 @@ class SSDLiteTrainer(BaseTrainer):
             val_vals=val_total_loss_hist
         )
 
-    def export_onnx(self, model: nn.Module):
-        raise NotImplemented
+    def export_onnx(self):
+        # --- 包装模型 ---
+        wrapper = SSDLiteExportWrapper(self.model)
+        wrapper.eval().to(self.device)
 
-    def export_wrapper(self, model: nn.Module):
-        raise NotImplemented
+        # --- 创建 dummy 输入，并移动到相同设备 ---
+        dummy = torch.randn(1, 3, 320, 320, device=self.device)
+
+        # --- 输出路径 ---
+        save_path = os.path.join(self.save_dir, "export.onnx")
+        os.makedirs(self.save_dir, exist_ok=True)
+
+        # Export the model to ONNX
+        torch.onnx.export(
+            wrapper,
+            dummy,
+            save_path,
+            input_names=["images"],
+            output_names=["output"],
+            dynamic_axes={"images": {0: "batch"}, "output": {0: "batch"}},
+            opset_version=13
+        )
+
+        print(f"[export] ONNX model saved to {save_path}")
+
+
+    def run_evaluation(self) -> Dict[str, float]:
+        """
+        重写基类的评估方法，以运行IoU-mAP评估。
+        """
+        print("\n" + "=" * 30)
+        print("Running IoU-mAP Evaluation on Validation Set...")
+
+        # 1. 创建评估器实例
+        evaluator = CocoDetectionEvaluator(
+            val_loader=self.val_dl,
+            results_dir=self.save_dir
+        )
+
+        # 2. 调用评估器的evaluate方法
+        metrics = evaluator.evaluate(self.model, self.device)
+
+        print("=" * 30 + "\n")
+        return metrics

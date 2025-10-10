@@ -144,7 +144,7 @@ class MoveNet_FPN(nn.Module):
         self.backbone = backbone
 
         # 创建 FPN：融合多尺度特征
-        # 获取 Backbone 的输出通道数 (C3, C4, C5)
+        # 获取 Backbone 的输出通道数 (C2, C3, C4, C5)
         backbone_channels = self.backbone.feature_info.channels()
         self.fpn = FPN(in_channels=backbone_channels,
                        out_channels=fpn_out_channels)
@@ -181,20 +181,23 @@ class MoveNet_FPN(nn.Module):
           4. 可选：上采样 P3 到 1/4 分辨率
           5. 预测头输出热图和偏移
         """
-        # 1. Backbone 特征提取
-        c3, c4, c5 = self.backbone(x)  # 三层特征金字塔
+        # 1. Backbone 特征提取 (现在输出4层)
+        c2, c3, c4, c5 = self.backbone(x)
 
-        # 2. FPN 融合：自顶向下 + 侧向连接
-        p3, _, _ = self.fpn((c3, c4, c5))  # 只使用 P3（高分辨率特征）
-        # 注意：忽略 P4 和 P5，因为单人姿态估计只需要高分辨率特征
+        # 2. FPN 融合：自顶向下 + 侧向连接 (现在输出 P2, P3, P4, P5)
+        fpn_features = self.fpn((c2, c3, c4, c5))
 
-        # 3. 可选上采样：提高输出分辨率
+        # 3. 选择用于姿态估计的特征图
+        # MoveNet 总是使用分辨率最高的特征图
+        # 如果 upsample_to_quarter 为True, 我们就用P2 (stride=4)
+        # 如果为False, 我们就用P3 (stride=8), 保持和旧逻辑兼容
         if self.upsample_to_quarter:
-            # 双线性插值上采样 2 倍：stride 8 -> stride 4
-            # align_corners=False 是 PyTorch 的推荐设置（更精确）
-            p3 = F.interpolate(p3, scale_factor=2.0, mode='bilinear', align_corners=False)
+            final_feature_map = fpn_features[0]  # 使用 P2 (stride=4)
+        else:
+            final_feature_map = fpn_features[1]  # 使用 P3 (stride=8)
 
         # 4. 预测头：生成热图和偏移
-        return self.head(p3)
+        # 上采样逻辑 `F.interpolate` 已经不再需要了
+        return self.head(final_feature_map)
 
 

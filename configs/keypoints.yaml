@@ -3,13 +3,13 @@
 # ==============================
 
 # ---------- 运行控制 ----------
-experiment_name: "movenet_fpn_mbv3"     # 方便日志/存档命名（可选）
-seed: 45                                 # 训练随机种子（你的 dataloader 默认用 45）
-resume: false                            # 是否从 save_dir/last.pt 续训
+experiment_name: "keypoints_mbv3"     # 方便日志/存档命名（可选）
+seed: 45                                # 训练随机种子（你的 dataloader 默认用 45）
+resume: true                            # 是否从 save_dir/last.pt 续训
 
 # ---------- 路径 ----------
 data_dir: "/home/user/datasets/coco2017_movenet_sp"  # 数据集根目录（你的代码会读）
-save_dir: "runs/movenet_fpn_mbv3"                    # 输出目录（ckpt/曲线图/日志）
+save_dir: "runs/keypoints_mbv3"                    # 输出目录（ckpt/曲线图/日志）
 
 # ---------- 模型 ----------
 backbone: "mobilenetv3_large_100" # timm backbone 名称（features_only=True, out_indices=(2,3,4)）
@@ -19,7 +19,7 @@ head_midc: 32                     # 头部中间通道
 upsample_to_quarter: true         # True：输出上采样到 1/4 分辨率（适配 stride=4 标签）
 
 # ---------- 输入与数据加载 ----------
-img_size: 192          # 输入尺寸（你的 create_kpts_dataloader_aug() 在用）
+img_size: 192           # 输入尺寸（你的 create_kpts_dataloader_aug() 在用）
 stride: 4               # 标签/特征步长（4 或 8；与 upsample_to_quarter 逻辑相关）
 batch_size: 64
 num_workers: 4          # DataLoader 的 worker 数
@@ -37,7 +37,7 @@ aug_cfg:
 
 # ---------- 损失 ----------
 hm_weight: 1.0          # 热图损失权重
-off_weight: 1.0         # 偏移损失权重
+off_weight: 0.1         # 偏移损失权重
 focal_alpha: 2.0        # Focal alpha
 focal_beta: 4.0         # Focal beta
 

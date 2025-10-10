@@ -1,5 +1,5 @@
 
-from typing import Optional
+from typing import Optional, Dict
 
 import torch
 from torch import GradScaler
@@ -15,6 +15,7 @@ class BaseTrainer:
                  model: nn.Module,
                  loss_fn: nn.Module,
                  *, data_dir: str,
+                 resume: bool = False,
                  save_dir: Optional[str] = None,
                  device: Optional[torch.device] = None,
 
@@ -48,6 +49,7 @@ class BaseTrainer:
         self.epochs = epochs
         self.save_dir = save_dir
         self.data_dir = data_dir
+        self.resume = resume
         self.cfg = kwargs
 
         # --- 训练技巧 ---
@@ -56,6 +58,7 @@ class BaseTrainer:
         self.clip_grad_norm = clip_grad_norm
         self.use_clip_grad = use_clip_grad
         self.use_ema = use_ema
+        self.use_amp = use_amp
 
         # --- 优化器和调度器 ---
         self.optimizer = select_optimizer(name=optimizer_name,
@@ -74,6 +77,8 @@ class BaseTrainer:
                                                      main_scheduler=self.scheduler,
                                                      start_factor=start_factor,
                                                      end_factor=end_factor)
+        # --- Others ---
+        self.BAR_FMT = "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
 
 
     # --- 需要子类实现的抽象方法 ---
@@ -90,10 +95,6 @@ class BaseTrainer:
                         device: torch.device):
         raise NotImplemented
 
-
-    def train_model(self):
-        raise NotImplemented
-
     def evaluate(self,
                  model: nn.Module,
                  loss_fn: nn.Module,
@@ -102,9 +103,19 @@ class BaseTrainer:
                  device: torch.device):
         raise NotImplemented
 
-    def export_onnx(self, model: nn.Module):
+    def train_model(self):
         raise NotImplemented
 
-    def export_wrapper(self, model: nn.Module):
+    def export_onnx(self):
         raise NotImplemented
+
+    def run_evaluation(self) -> Dict[str, float]:
+        """
+        运行面向最终任务指标的评估 (例如 AP, mIoU 等)。
+        子类应该重写此方法以实现特定任务的评估逻辑。
+        """
+        # 默认行为是打印一条消息并返回空字典
+        print(f"'{self.__class__.__name__}' has not implemented the task-specific 'run_evaluation' method.")
+        return {}
+
     # --- 辅助工具函数 ---

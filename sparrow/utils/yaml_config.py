@@ -1,180 +1,156 @@
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple, Iterable, Set
 
 import yaml
-
 from sparrow.utils.logger import logger
 
 
+# ---- 统一维护：BaseTrainer 会“占用”的关键字（避免与 **kwargs 冲突） ----
+BASE_TRAINER_RESERVED_KEYS: Set[str] = {
+    # 基础
+    "data_dir", "save_dir", "device", "model", "loss_fn",
+    "seed", "experiment_name", "resume",
+
+    # dataloader 相关
+    "batch_size", "num_workers", "pin_memory",
+
+    # 训练轮次/混合精度/EMA/梯度裁剪
+    "epochs", "use_amp", "use_ema", "ema_decay",
+    "use_clip_grad", "clip_grad_norm",
+
+    # 优化器
+    "optimizer_name", "lr", "weight_decay",
+    "betas", "eps", "amsgrad", "momentum", "nesterov",
+    "alpha", "centered", "lr_decay", "rho",
+
+    # 学习率调度器（尽量全）
+    "scheduler_name", "T_max", "eta_min",
+    "step_size", "gamma", "milestones",
+    "mode", "factor", "patience", "threshold", "min_lr", "verbose",
+    "max_lr", "steps_per_epoch", "pct_start", "anneal_strategy",
+    "div_factor", "final_div_factor", "total_iters",
+    "start_factor", "end_factor", "use_warmup_scheduler", "warmup_epochs",
+    "power",
+}
+
+def _split_reserved(cfg: Dict[str, Any],
+                    reserved_keys: Optional[Iterable[str]] = None
+                    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    返回 (core, extra)
+    - core: 仅包含保留键（通常由 BaseTrainer 显式接收）
+    - extra: 其余键，安全地作为 **kwargs 继续下传
+    """
+    reserved = set(reserved_keys) if reserved_keys is not None else BASE_TRAINER_RESERVED_KEYS
+    core = {k: v for k, v in cfg.items() if k in reserved}
+    extra = {k: v for k, v in cfg.items() if k not in reserved}
+    return core, extra
+
+
+def _pretty_print_config(cfg: Dict[str, Any]) -> None:
+    """
+    结构化输出配置：
+    - 顶层按键名排序
+    - 若值是 dict，则作为一个小节打印子项（缩进 2 空格）
+    - 其他标量键按表格列对齐：Key | Value | (Type)
+    """
+    def _format_kv(k: str, v: Any) -> Tuple[str, str, str]:
+        v_disp = yaml.dump(v, default_flow_style=True).strip() if isinstance(v, (list, dict)) else str(v)
+        ty = type(v).__name__
+        return k, v_disp, ty
+
+    scalar_items = []
+    section_items = []
+
+    for k in sorted(cfg.keys()):
+        v = cfg[k]
+        if isinstance(v, dict):
+            section_items.append((k, v))
+        else:
+            scalar_items.append(_format_kv(k, v))
+
+    # 计算列宽
+    def _col_width(rows, idx):
+        return max((len(r[idx]) for r in rows), default=0)
+
+    key_w  = _col_width(scalar_items, 0)
+    val_w  = _col_width(scalar_items, 1)
+
+    print("\n[config] ========= Effective Configuration =========")
+    if scalar_items:
+        header = f"{'Key'.ljust(key_w)}  {'Value'.ljust(val_w)}  (Type)"
+        print(header)
+        print("-" * len(header))
+        for k, v, ty in scalar_items:
+            print(f"{k.ljust(key_w)}  {v.ljust(val_w)}  ({ty})")
+
+    for sec_name, sec_dict in section_items:
+        print(f"\n[{sec_name}]")
+        if not sec_dict:
+            print("  <empty>")
+            continue
+        # 子项按键名排序
+        sub_items = []
+        for sk in sorted(sec_dict.keys()):
+            sub_items.append(_format_kv(sk, sec_dict[sk]))
+        sk_w = max((len(i[0]) for i in sub_items), default=0)
+        sv_w = max((len(i[1]) for i in sub_items), default=0)
+        print(f"  {'Key'.ljust(sk_w)}  {'Value'.ljust(sv_w)}  (Type)")
+        print("  " + "-" * (2 + sk_w + 2 + sv_w + 7))
+        for sk, sv, sty in sub_items:
+            print(f"  {sk.ljust(sk_w)}  {sv.ljust(sv_w)}  ({sty})")
+    print("[config] ===========================================\n")
+
+
 def update_from_yaml(yaml_path: Optional[str] = None,
-                     default_dict: Optional[dict] = None) -> Dict[str, Any]:
+                     default_dict: Optional[Dict[str, Any]] = None,
+                     *,
+                     reserved_keys: Optional[Iterable[str]] = None,
+                     return_extra: bool = False
+                     ) -> Any:
     """
-    从 YAML 文件更新配置，支持部分覆盖和类型验证
+    以 YAML 为主、默认兜底；可选返回 (cfg, extra_cfg)：
+      - cfg: 完整配置（用于 self.cfg 及 get(...)）
+      - extra_cfg: 剔除保留键后的剩余项，安全用于 **kwargs 继续传递
 
-    功能：
-      1. 如果 YAML 文件不存在或路径为空，使用默认配置
-      2. 如果 YAML 内容为空或格式错误，使用默认配置并发出警告
-      3. 只更新 YAML 中存在的键，其他保持默认值
-      4. 对关键配置进行类型和范围检查
+    用法：
+        cfg, extra = update_from_yaml(path, default_dict, return_extra=True)
+        # super(..., **extra)
 
-    参数:
-      yaml_path: YAML 配置文件路径（None 或空字符串表示使用默认配置）
-      default_dict: 默认配置
-
-    返回:
-      更新后的配置字典
-
-    配置文件示例（config.yaml）:
-      ```yaml
-      # 训练配置
-      data_root: "/data/biwi"
-      epochs: 50
-      batch_size: 32
-      lr: 1e-4
-
-      # 可选配置（不写则使用默认值）
-      # workers: 4
-      # use_amp: false
-      ```
-
-    使用示例:
-      >>> # 场景 1：使用默认配置
-      >>> cfg = update_from_yaml()
-      >>>
-      >>> # 场景 2：从 YAML 更新
-      >>> cfg = update_from_yaml("configs/train.yaml")
-      >>>
-      >>> # 场景 3：文件不存在时的容错
-      >>> cfg = update_from_yaml("non_existent.yaml")  # 返回默认配置
+    兼容老用法：
+        cfg = update_from_yaml(path, default_dict)   # 仅返回 cfg
     """
-    # 1. 复制默认配置（避免修改全局 CFG）
-    if default_dict is None:
-        config = {}
+    base = (default_dict or {}).copy()
+
+    yaml_cfg: Dict[str, Any] = {}
+    if yaml_path and isinstance(yaml_path, str) and os.path.isfile(yaml_path):
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                loaded = yaml.safe_load(f)
+                if isinstance(loaded, dict):
+                    yaml_cfg = loaded
+                elif loaded is None:
+                    logger.warning("config", f"YAML is empty: {yaml_path} -> using defaults.")
+                else:
+                    logger.warning("config", f"YAML content not a dict ({type(loaded).__name__}), using defaults.", )
+        except Exception as e:
+            logger.error_trace("config", f"Failed to load YAML: {yaml_path}; Using defaults.")
+    elif yaml_path:
+        logger.warning("config", f"YAML not found: {yaml_path}; Using defaults.")
     else:
-        config = default_dict.copy()
+        logger.warning("config", "No YAML path provided, using defaults")
 
-    # 2. 检查 YAML 路径是否有效
-    if not yaml_path or not isinstance(yaml_path, str):
-        print("[config] No YAML path provided, using default configuration")
-        return config
+    cfg: Dict[str, Any] = base
+    cfg.update(yaml_cfg)
 
-    # 3. 检查文件是否存在
-    if not os.path.isfile(yaml_path):
-        logger.warning("update_from_yaml",
-            f"[config] YAML file not found: {yaml_path}\n"
-            f"         Using default configuration instead."
-        )
-        return config
-
-    # 4. 尝试加载 YAML 文件
-    try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            yaml_config = yaml.safe_load(f)
-
-        # 检查 YAML 内容是否为空
-        if yaml_config is None:
-            logger.warning("update_from_yaml",
-                f"[config] YAML file is empty: {yaml_path}\n"
-                f"         Using default configuration."
-            )
-            return config
-
-        # 检查是否为字典类型
-        if not isinstance(yaml_config, dict):
-            logger.warning("update_from_yaml",
-                f"[config] YAML content is not a dictionary: {yaml_path}\n"
-                f"         Expected dict, got {type(yaml_config).__name__}\n"
-                f"         Using default configuration."
-            )
-            return config
-
-    except yaml.YAMLError as e:
-        logger.warning("update_from_yaml",
-            f"[config] Failed to parse YAML file: {yaml_path}\n"
-            f"         Error: {e}\n"
-            f"         Using default configuration."
-        )
-        return config
-    except Exception as e:
-        logger.warning("update_from_yaml",
-            f"[config] Unexpected error loading YAML: {yaml_path}\n"
-            f"         Error: {e}\n"
-            f"         Using default configuration."
-        )
-        return config
-
-    # 5. 合并配置（只更新 YAML 中存在的键）
-    updated_keys = []
-    invalid_keys = []
-
-    for key, value in yaml_config.items():
-        # 检查键是否在默认配置中
-        if key not in config:
-            invalid_keys.append(key)
-            continue
-
-        # 类型检查：确保新值类型与默认值兼容
-        default_value = config[key]
-        default_type = type(default_value)
-
-        # 特殊处理：空字符串和 None 可以互换
-        if default_value == "" and value is None:
-            config[key] = ""
-            updated_keys.append(key)
-            continue
-
-        # 特殊处理：数值类型的兼容（int 和 float）
-        if isinstance(default_value, (int, float)) and isinstance(value, (int, float)):
-            config[key] = type(default_value)(value)  # 转换为默认类型
-            updated_keys.append(key)
-            continue
-
-        # 一般类型检查
-        if not isinstance(value, default_type):
-            logger.warning("update_from_yaml",
-                f"[config] Type mismatch for key '{key}': "
-                f"expected {default_type.__name__}, got {type(value).__name__}\n"
-                f"         Skipping this key."
-            )
-            continue
-
-        # 更新配置
-        config[key] = value
-        updated_keys.append(key)
-
-    # 6. 打印配置更新摘要
-    print(f"[config] Loaded configuration from: {yaml_path}")
-    if updated_keys:
-        print(f"[config] Updated {len(updated_keys)} keys: {', '.join(updated_keys)}")
+    if yaml_cfg:
+        logger.info("config", f"Updated configuration from: {yaml_path}")
     else:
-        print("[config] No valid keys updated from YAML")
+        logger.warning("config", "No configuration loaded from YAML, using defaults.")
 
-    if invalid_keys:
-        logger.warning("update_from_yaml",
-            f"[config] Found {len(invalid_keys)} invalid keys (not in default config): "
-            f"{', '.join(invalid_keys)}\n"
-            f"         These keys will be ignored."
-        )
+    _pretty_print_config(cfg)
 
-    return config
-
-
-def save_config_to_yaml(config: Dict[str, Any], save_path: str) -> None:
-    """
-    将配置保存为 YAML 文件（方便复现实验）
-
-    参数:
-      config: 配置字典
-      save_path: 保存路径
-
-    示例:
-      >>> cfg = update_from_yaml("config.yaml")
-      >>> save_config_to_yaml(cfg, "runs/exp1/config_used.yaml")
-    """
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-    with open(save_path, "w", encoding="utf-8") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-
-    logger.info("save_config_to_yaml",
-                f"[config] Configuration saved to: {save_path}")
+    if return_extra:
+        _, extra = _split_reserved(cfg, reserved_keys)
+        return cfg, extra
+    return cfg

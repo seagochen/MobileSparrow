@@ -204,12 +204,9 @@ class EMA:
 
 
 # ==================== 使用示例 ====================
-
 if __name__ == "__main__":
     import torch.nn as nn
     import torch.optim as optim
-
-
     # 创建示例模型
     class SimpleModel(nn.Module):
         def __init__(self):
@@ -227,6 +224,10 @@ if __name__ == "__main__":
     # 初始化 EMA
     ema = EMA(model, decay=0.9999)
 
+    # 跟踪最佳模型
+    best_loss = float('inf')
+    best_step = 0
+
     # 模拟训练
     print("=== 训练示例 ===")
     for step in range(100):
@@ -243,9 +244,32 @@ if __name__ == "__main__":
         # 更新 EMA
         ema.update(model)
 
-        # 每 20 步打印一次衰减系数
+        # 模拟验证并更新最佳检查点
         if (step + 1) % 20 == 0:
-            print(f"Step {step + 1}: effective_decay = {ema.get_decay():.6f}")
+            # 使用 EMA 模型进行验证
+            ema.ema_model.eval()
+            with torch.no_grad():
+                val_x = torch.randn(10, 10)
+                val_output = ema.ema_model(val_x)
+                val_loss = val_output.sum().item()
+
+            print(f"Step {step + 1}: effective_decay = {ema.get_decay():.6f}, val_loss = {val_loss:.4f}")
+
+            # 更新最佳检查点
+            if val_loss < best_loss:
+                best_loss = val_loss
+                best_step = step + 1
+                # 保存最佳检查点
+                best_checkpoint = {
+                    'step': step + 1,
+                    'model': model.state_dict(),
+                    'ema_model': ema.ema_model.state_dict(),
+                    'ema_updates': ema.updates,
+                    'optimizer': optimizer.state_dict(),
+                    'best_loss': best_loss
+                }
+                torch.save(best_checkpoint, 'best_checkpoint.pth')
+                print(f"✓ New best model saved at step {step + 1} with loss {best_loss:.4f}")
 
     # 验证时使用 EMA 模型
     print("\n=== 验证示例 ===")
@@ -259,21 +283,25 @@ if __name__ == "__main__":
         print(f"训练模型输出: {out_train.mean().item():.4f}")
         print(f"EMA 模型输出: {out_ema.mean().item():.4f}")
 
-    # 保存检查点
-    print("\n=== 保存检查点示例 ===")
-    checkpoint = {
+    # 保存最终检查点
+    print("\n=== 保存最终检查点示例 ===")
+    final_checkpoint = {
+        'step': step + 1,
         'model': model.state_dict(),
         'ema_model': ema.ema_model.state_dict(),
         'ema_updates': ema.updates,
-        'optimizer': optimizer.state_dict()
+        'optimizer': optimizer.state_dict(),
+        'best_loss': best_loss,
+        'best_step': best_step
     }
-    torch.save(checkpoint, 'checkpoint_with_ema.pth')
-    print("✓ Checkpoint saved with EMA weights")
+    torch.save(final_checkpoint, 'last_checkpoint.pth')
+    print("✓ Final checkpoint saved with EMA weights")
+    print(f"Best model was at step {best_step} with loss {best_loss:.4f}")
 
     # 恢复训练
     print("\n=== 恢复训练示例 ===")
-    ckpt = torch.load('checkpoint_with_ema.pth')
+    ckpt = torch.load('best_checkpoint.pth')  # 加载最佳检查点
     model.load_state_dict(ckpt['model'])
     ema_restored = EMA(model, decay=0.9999, updates=ckpt['ema_updates'])
     ema_restored.ema_model.load_state_dict(ckpt['ema_model'])
-    print(f"✓ EMA restored from step {ema_restored.updates}")
+    print(f"✓ EMA restored from step {ema_restored.updates} (best checkpoint)")
