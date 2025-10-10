@@ -51,7 +51,7 @@ class SixDRepNetTrainer(BaseTrainer):
             model,
             loss_fn,
             data_dir=cfg.get("data_dir", "/home/user/datasets/biwi"),
-            save_dir=cfg.get("save_dir", "runs/biwi_sixd_mbv3"),
+            save_dir=cfg.get("save_dir", "runs/rotation_mbv3"),
             device=device,
             resume=cfg.get("resume", False),
 

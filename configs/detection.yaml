@@ -3,13 +3,13 @@
 # ==============================
 
 # ---------- 运行控制 ----------
-experiment_name: "ssdlite_fpn_mbv3"     # 方便日志/存档命名（可选）
+experiment_name: "detection_mbv3"     # 方便日志/存档命名（可选）
 seed: 45                                # 训练随机种子（create_dataloaders 默认 45）
 resume: true                            # 是否从 save_dir/last.pt 续训
 
 # ---------- 路径 ----------
 data_dir: "/home/user/datasets/coco2017_ssdlite"  # 数据集根目录（你的代码会读）
-save_dir: "runs/ssdlite_fpn_mbv3"                 # 输出目录（ckpt/曲线图/日志）
+save_dir: "runs/detection_mbv3"                 # 输出目录（ckpt/曲线图/日志）
 
 # ---------- 模型 ----------
 backbone: "mobilenetv3_large_100" # timm backbone（features_only=True, out_indices=(2,3,4)）

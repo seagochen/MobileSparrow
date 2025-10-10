@@ -58,7 +58,7 @@ class SSDLiteTrainer(BaseTrainer):
             model,
             loss_fn,
             data_dir=cfg.get("data_dir", "/home/user/datasets/coco2017_ssdlite"),
-            save_dir=cfg.get("save_dir", "runs/ssdlite_fpn_mbv3"),
+            save_dir=cfg.get("save_dir", "runs/detection_mbv3"),
             device=device,
             resume=cfg.get("resume", False),
 

@@ -56,7 +56,7 @@ class MoveNetTrainer(BaseTrainer):
             model,
             loss_fn,
             data_dir=cfg.get("data_dir", "/home/user/datasets/coco2017_movenet_sp"),
-            save_dir=cfg.get("save_dir", "runs/movenet_fpn_mbv3"),
+            save_dir=cfg.get("save_dir", "runs/keypoints_mbv3"),
             device=device,
             resume=cfg.get("resume", False),
 
