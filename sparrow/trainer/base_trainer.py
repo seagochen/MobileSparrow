@@ -5,6 +5,7 @@ import torch
 from torch import GradScaler
 from torch import nn
 
+from sparrow.losses.automatic_weighted_loss import AutomaticWeightedLoss
 from sparrow.trainer.components import select_optimizer, build_scheduler, create_warmup_scheduler
 from sparrow.trainer.ema import EMA
 
@@ -23,6 +24,10 @@ class BaseTrainer:
                  optimizer_name: str,
                  lr: float,
                  weight_decay: float,
+
+                 # 动态权重调节器
+                 use_awl: bool=False,
+                 num_tasks: Optional[int] = None,
 
                  # 训练参数 - scheduler
                  scheduler_name: str,
@@ -59,13 +64,29 @@ class BaseTrainer:
         self.use_clip_grad = use_clip_grad
         self.use_ema = use_ema
         self.use_amp = use_amp
+        self.use_awl = use_awl
 
         # --- 优化器和调度器 ---
-        self.optimizer = select_optimizer(name=optimizer_name,
-                                          model=self.model,
-                                          lr=lr,
-                                          weight_decay=weight_decay,
-                                          **kwargs)
+        if self.use_awl:
+            self.num_tasks = num_tasks
+            self.awl = AutomaticWeightedLoss(num_tasks=self.num_tasks)
+            self.optimizer = select_optimizer(
+                name=optimizer_name,
+                # 将模型参数和 awl 参数合并
+                model=[
+                    {'params': self.model.parameters()},
+                    {'params': self.awl.parameters(), 'weight_decay': 0.0}  # 通常不对权重参数应用 weight_decay
+                ],
+                lr=lr,
+                weight_decay=weight_decay,
+                **kwargs
+            )
+        else:
+            self.optimizer = select_optimizer(name=optimizer_name,
+                                              model=self.model,
+                                              lr=lr,
+                                              weight_decay=weight_decay,
+                                              **kwargs)
 
         self.scheduler = build_scheduler(name=scheduler_name,
                                          optimizer=self.optimizer,

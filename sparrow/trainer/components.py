@@ -16,15 +16,27 @@ from sparrow.utils.logger import logger
 
 def select_optimizer(
         name: str,
-        model: Union[nn.Module, Iterator[nn.Parameter]],
+        model: Union[nn.Module, Iterator[nn.Parameter], list],
         lr: float,
         weight_decay: float = 0.0,
         **kw
 ) -> torch.optim.Optimizer:
 
-    # ========== 1. 参数提取（兼容两种输入方式）==========
-    # 检查是否传入的是模型（有 parameters 方法）还是参数迭代器
-    params = model.parameters() if hasattr(model, "parameters") else model
+    # ========== 1. 参数提取（兼容三种输入方式）==========
+    # 检查输入类型：
+    # 1. 模型对象（有 parameters 方法）
+    # 2. 参数迭代器
+    # 3. 参数组列表（用于不同参数组设置不同超参数，如 AWL）
+    if isinstance(model, list):
+        # 如果是参数组列表，直接使用
+        # 格式：[{'params': ..., 'lr': ..., 'weight_decay': ...}, ...]
+        params = model
+    elif hasattr(model, "parameters"):
+        # 如果是模型对象，调用 parameters() 方法
+        params = model.parameters()
+    else:
+        # 否则假定是参数迭代器
+        params = model
 
     # ========== 2. 类型转换（处理 YAML 配置）==========
     # YAML 解析器可能将数值读取为字符串，需要强制转换

@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from sparrow.datasets.coco_dets import create_coco_ssd_dataloader
 from sparrow.evaluators.coco_dets_evaluator import CocoDetectionEvaluator
+from sparrow.losses.automatic_weighted_loss import AutomaticWeightedLoss
 from sparrow.losses.ssdlite_fpn_loss import SSDLoss
 from sparrow.models.onnx.ssdlite_fpn_wrapper import SSDLiteExportWrapper
 from sparrow.models.ssdlite_fpn import SSDLite_FPN
@@ -50,8 +51,9 @@ class SSDLiteTrainer(BaseTrainer):
             iou_threshold_pos=cfg.get("iou_pos", 0.45),
             iou_threshold_neg=cfg.get("iou_neg", 0.30),
             focal_alpha=cfg.get("focal_alpha", 0.25),
-            reg_weight = cfg.get("reg_weight", 1.0),
-            cls_weight = cfg.get("cls_weight", 0.2),
+            reg_weight=cfg.get("reg_weight", 1.0),
+            cls_weight=cfg.get("cls_weight", 1.0),
+            use_awl=cfg.get("use_awl", True)
         )
 
         # --- 初始化 super ---
@@ -67,6 +69,10 @@ class SSDLiteTrainer(BaseTrainer):
             optimizer_name=cfg.get("optimizer_name", "adamw"),
             lr=cfg.get("lr", 3e-4),
             weight_decay=cfg.get("weight_decay",  1e-4),
+
+            # 动态权重调节器
+            use_awl=True,
+            num_tasks=2,
 
             # Scheduler
             scheduler_name=cfg.get("scheduler_name", "cosine"),
@@ -190,6 +196,15 @@ class SSDLiteTrainer(BaseTrainer):
                     preds["bbox_deltas"],
                     labels)
 
+                # If awl is activate
+                if self.use_awl:
+                    # Decompand the sub-loss
+                    loss_cls = details["cls_loss"]
+                    loss_reg = details["reg_loss"]
+
+                    # Use awl to update the final loss
+                    loss = self.awl([loss_cls, loss_reg])
+
             # 4.4 反向传播（使用梯度缩放）
             # 原因：float16 计算时梯度可能下溢，需要缩放
             scaler.scale(loss).backward()
@@ -212,6 +227,11 @@ class SSDLiteTrainer(BaseTrainer):
             running["cls"]   += details["cls_loss"].item()
             running["reg"]   += details["reg_loss"].item()
             count += 1
+
+            # 4.8. Print out the updated weight of loss
+            if self.use_awl:
+                weights = torch.exp(-self.awl.log_sigma_sq)
+                pbar.set_postfix({"cls_w": f"{weights[0].item():.2f}", "reg_w": f"{weights[1].item():.2f}"})
 
             # 4.8 更新进度条显示, 显示当前平均损失和学习率
             # pbar.set_postfix({

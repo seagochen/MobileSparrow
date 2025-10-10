@@ -76,28 +76,31 @@ class SSDLoss(nn.Module):
                  num_classes: int,
                  iou_threshold_pos: float = 0.5,
                  iou_threshold_neg: float = 0.4,
-                 reg_weight: float = 1.0,
-                 cls_weight: float = 0.2,
                  focal_alpha: float = 0.25,
-                 focal_gamma: float = 2.0):
+                 focal_gamma: float = 2.0,
+                 reg_weight: float = 1.0,
+                 cls_weight: float = 1.0,
+                 use_awl: bool = False):
         """
         参数:
           num_classes: 前景类别数（不包括背景）
           iou_threshold_pos: 正样本 IoU 阈值（≥ 该值视为正样本）
           iou_threshold_neg: 负样本 IoU 阈值（< 该值视为背景）
-          reg_weight: regression loss weight
-          cls_weight: classification loss weight
           focal_alpha: Focal Loss 的 alpha 参数（正负样本平衡）
           focal_gamma: Focal Loss 的 gamma 参数（困难样本关注度）
+          cls_weight: Weight of classification loss
+          reg_weight: Weight of regression loss
+          use_awl: Whether to use AWL (automatic weight loss)
         """
         super().__init__()
         self.num_classes = int(num_classes)
         self.iou_threshold_pos = float(iou_threshold_pos)
         self.iou_threshold_neg = float(iou_threshold_neg)
-        self.reg_weight = float(reg_weight)
-        self.cls_weight = float(cls_weight)
         self.focal_alpha = float(focal_alpha)
         self.focal_gamma = float(focal_gamma)
+        self.reg_weight = reg_weight
+        self.cls_weight = cls_weight
+        self.use_awl = use_awl
 
         self.anchor_utils = AnchorGenerator()
         # 边界框编码的标准差（用于归一化回归目标）
@@ -279,9 +282,17 @@ class SSDLoss(nn.Module):
         # beta=1/9 是 Faster R-CNN/RetinaNet 的常用设置
         loss_reg = F.smooth_l1_loss(reg_pred_pos, target_deltas, beta=1 / 9, reduction="sum") / num_pos
 
-        # 10. 返回总损失和详细信息（detach 避免影响梯度）
+        # 10. Calculate the total loss
         total_loss = loss_cls * self.cls_weight + loss_reg * self.reg_weight
-        return total_loss, {
-            "cls_loss": loss_cls.detach(),
-            "reg_loss": loss_reg.detach()
-        }
+
+        # 10. 返回总损失和详细信息（detach 避免影响梯度）
+        if self.use_awl:  # Return different losses separately for AWL
+            return total_loss.detach(), {
+                "cls_loss": loss_cls,
+                "reg_loss": loss_reg
+            }
+        else:  # Normally
+            return total_loss, {
+                "cls_loss": loss_cls.detach(),
+                "reg_loss": loss_reg.detach()
+            }
